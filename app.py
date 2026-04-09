@@ -91,32 +91,13 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-[data-testid="stSpinner"] {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100vw;
-    height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 9999;
-    background: rgba(0, 0, 0, 0.45);
-}
-[data-testid="stSpinner"] > div {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 1rem;
-}
-[data-testid="stSpinner"] svg {
-    width: 120px !important;
-    height: 120px !important;
-}
-[data-testid="stSpinner"] p {
-    font-size: 1.6rem !important;
-    font-weight: 600;
-    color: #ffffff;
+[data-testid="stStatusWidget"] {
+    position: fixed !important;
+    top: 50% !important;
+    left: 50% !important;
+    right: auto !important;
+    transform: translate(-50%, -50%) scale(4) !important;
+    z-index: 9999 !important;
 }
 </style>
 """, unsafe_allow_html=True)
