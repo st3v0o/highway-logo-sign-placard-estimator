@@ -77,7 +77,7 @@ The URL builder is in **`roboflow_client.py`**, in the `build_inference_url()` f
 
 ```python
 def build_inference_url(workspace_id: str, project_id: str, version: int) -> str:
-    return f"https://detect.roboflow.com/{project_id}/{version}"
+    return f"https://detect.roboflow.com/{workspace_id}/{project_id}/{version}"
 ```
 
 If Roboflow changes their hosted inference URL format, edit only this one function. All model calls use it automatically.

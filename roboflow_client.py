@@ -21,12 +21,13 @@ def build_inference_url(workspace_id: str, project_id: str, version: int) -> str
     """
     Build the Roboflow hosted inference URL for a given model.
 
-    Current format:
-        https://detect.roboflow.com/{project_id}/{version}
+    Current format (Roboflow hosted inference v0):
+        https://detect.roboflow.com/{workspace_id}/{project_id}/{version}
 
-    If Roboflow changes their URL format, update only this function.
+    The workspace_id is included so it matches how Roboflow organises
+    projects. If Roboflow changes their URL format, update only this function.
     """
-    return f"https://detect.roboflow.com/{project_id}/{version}"
+    return f"https://detect.roboflow.com/{workspace_id}/{project_id}/{version}"
 
 
 # ---------------------------------------------------------------------------
