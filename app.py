@@ -6,12 +6,13 @@ Streamlit GUI for the Highway Logo Sign Placard Capacity Estimator.
 Workflow:
   1. Upload an image of a highway logo sign
   2. Configure Roboflow model credentials in the sidebar (or enable Mock Mode)
-  3. Click "Run Inference"
-  4. View annotated image, fit count, and debug info
+  3. Click "Run Inference" — calls both models once and stores predictions
+  4. Adjust the Placard Scale slider to live-update placements without re-running inference
 """
 
 import json
 import os
+from io import BytesIO
 
 import streamlit as st
 from PIL import Image
@@ -58,7 +59,6 @@ def load_settings() -> dict:
         try:
             with open(SETTINGS_FILE, "r") as f:
                 saved = json.load(f)
-            # Merge with defaults so new keys added in future versions are included
             return {**DEFAULTS, **saved}
         except Exception:
             pass
@@ -71,7 +71,7 @@ def save_settings(values: dict) -> None:
         json.dump(values, f, indent=2)
 
 
-# Load saved settings once per session (not on every rerun)
+# Load saved settings once per session
 if "settings_loaded" not in st.session_state:
     saved = load_settings()
     for k, v in saved.items():
@@ -160,8 +160,7 @@ with st.sidebar:
         max_value=100,
         step=5,
         key="placard_scale",
-        help="Scale the fitting rectangle down from the estimated/default size. "
-             "Lower values let placards fit into tighter spaces.",
+        help="Scales the fitting rectangle. Lower values fit placards into tighter spaces. Updates live after inference.",
     )
 
     st.divider()
@@ -212,7 +211,7 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------------------
-# Image uploader
+# Image uploader + Run button
 # ---------------------------------------------------------------------------
 
 st.divider()
@@ -225,7 +224,9 @@ uploaded_file = st.file_uploader(
 run_button = st.button("Run Inference", type="primary", disabled=uploaded_file is None)
 
 # ---------------------------------------------------------------------------
-# Inference
+# Inference — runs only when the button is clicked.
+# Stores raw predictions + image bytes in session_state so that slider
+# changes can re-run fitting without hitting the API again.
 # ---------------------------------------------------------------------------
 
 if run_button and uploaded_file is not None:
@@ -236,9 +237,7 @@ if run_button and uploaded_file is not None:
         if mock_mode:
             placard_resp = MOCK_PLACARD_RESPONSE
             empty_resp = MOCK_EMPTY_SPACE_RESPONSE
-            st.info("Mock Mode is ON — using sample predictions (no API call made).")
         else:
-            # Validate credentials before calling
             missing = []
             if not api_key:
                 missing.append("API Key")
@@ -277,14 +276,42 @@ if run_button and uploaded_file is not None:
                 st.error(f"Empty-space model call failed: {exc}")
                 st.stop()
 
+    # Filter by confidence and store everything in session_state
     placard_preds = placard_resp.get("predictions", [])
     empty_preds = empty_resp.get("predictions", [])
+    conf = min_confidence
+    st.session_state["last_placard_preds"] = [p for p in placard_preds if p.get("confidence", 0) >= conf]
+    st.session_state["last_empty_preds"] = [p for p in empty_preds if p.get("confidence", 0) >= conf]
+    st.session_state["last_placard_resp"] = placard_resp
+    st.session_state["last_empty_resp"] = empty_resp
+    st.session_state["last_mock_mode"] = mock_mode
 
-    # Filter by confidence
-    placard_preds_filtered = [p for p in placard_preds if p.get("confidence", 0) >= min_confidence]
-    empty_preds_filtered = [p for p in empty_preds if p.get("confidence", 0) >= min_confidence]
+    # Store image as bytes so it survives reruns
+    buf = BytesIO()
+    pil_image.save(buf, format="PNG")
+    st.session_state["last_img_bytes"] = buf.getvalue()
+    st.session_state["last_img_w"] = img_w
+    st.session_state["last_img_h"] = img_h
 
-    # Run fitting
+
+# ---------------------------------------------------------------------------
+# Results — runs on every rerun (including slider changes) if predictions exist.
+# This means scale/margin/spacing sliders live-update without re-calling the API.
+# ---------------------------------------------------------------------------
+
+if "last_placard_preds" in st.session_state:
+    placard_preds_filtered = st.session_state["last_placard_preds"]
+    empty_preds_filtered = st.session_state["last_empty_preds"]
+    placard_resp = st.session_state["last_placard_resp"]
+    empty_resp = st.session_state["last_empty_resp"]
+    img_w = st.session_state["last_img_w"]
+    img_h = st.session_state["last_img_h"]
+    pil_image = Image.open(BytesIO(st.session_state["last_img_bytes"]))
+
+    if st.session_state.get("last_mock_mode"):
+        st.info("Mock Mode is ON — using sample predictions (no API call made).")
+
+    # Re-run fitting with current slider values every time
     results = estimate_total_capacity(
         empty_space_predictions=empty_preds_filtered,
         placard_predictions=placard_preds_filtered,
@@ -294,23 +321,23 @@ if run_button and uploaded_file is not None:
         default_placard_h=int(default_placard_h),
         margin=int(outer_margin),
         spacing=int(spacing),
-        min_confidence=min_confidence,
+        min_confidence=0.0,  # already pre-filtered
         estimate_size_from_detections=estimate_from_detections,
         placard_scale=placard_scale / 100.0,
     )
 
-    # Render annotated image
+    # Re-render annotated image with current placements
     annotated = render_annotated_image(
         pil_image=pil_image,
         placard_predictions=placard_preds_filtered,
         empty_space_predictions=empty_preds_filtered,
         per_region=results["per_region"],
-        min_confidence=0.0,  # already pre-filtered
+        min_confidence=0.0,
     )
 
-    # ---------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # Results display
-    # ---------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
 
     st.divider()
     col_img, col_stats = st.columns([3, 1])
@@ -330,9 +357,9 @@ if run_button and uploaded_file is not None:
         st.metric("Placard Width Used (px)", results["placard_w"])
         st.metric("Placard Height Used (px)", results["placard_h"])
 
-    # ---------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # Debug panel
-    # ---------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
 
     st.divider()
     st.subheader("Debug Panel")
@@ -357,9 +384,9 @@ if run_button and uploaded_file is not None:
         ]
         st.table(region_data)
 
-    # ---------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # Raw JSON
-    # ---------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
 
     st.divider()
     with st.expander("Raw JSON — Placard Model Response"):
@@ -368,5 +395,5 @@ if run_button and uploaded_file is not None:
     with st.expander("Raw JSON — Empty-Space Model Response"):
         st.json(empty_resp)
 
-elif uploaded_file is None:
+elif uploaded_file is None and "last_placard_preds" not in st.session_state:
     st.info("Upload an image to get started.")
