@@ -107,6 +107,7 @@ def place_rectangles_in_region(
     placard_w: int,
     placard_h: int,
     spacing: int = 4,
+    global_reserved: np.ndarray | None = None,
 ) -> list[tuple[int, int, int, int]]:
     """
     Greedily place non-overlapping placard rectangles inside the region mask.
@@ -114,24 +115,29 @@ def place_rectangles_in_region(
     Scans left-to-right, top-to-bottom. After placing each placard, reserves
     spacing around it before trying the next position.
 
+    global_reserved: optional shared array (same shape as mask) tracking
+    positions already occupied by placements from other regions. Mutated
+    in-place so that subsequent regions respect these placements too.
+
     Returns a list of (x1, y1, x2, y2) tuples for each proposed placement.
     """
     if placard_w <= 0 or placard_h <= 0:
         return []
 
     img_h, img_w = mask.shape
-    reserved = np.zeros((img_h, img_w), dtype=np.uint8)
+
+    # Use the shared global reserved array if provided, otherwise a local one.
+    reserved = global_reserved if global_reserved is not None else np.zeros((img_h, img_w), dtype=np.uint8)
     placements: list[tuple[int, int, int, int]] = []
 
     step_x = max(1, placard_w + spacing)
-    step_y = max(1, placard_h + spacing)
 
     y = 0
     while y + placard_h <= img_h:
         x = 0
         while x + placard_w <= img_w:
-            # Check the ENTIRE proposed rectangle footprint is unreserved,
-            # not just the top-left corner — prevents overlapping placements.
+            # Check the ENTIRE proposed rectangle footprint is unreserved
+            # across all regions (not just the top-left corner).
             footprint_clear = np.all(reserved[y:y + placard_h, x:x + placard_w] == 0)
             if footprint_clear and can_place_rectangle(mask, x, y, placard_w, placard_h):
                 placements.append((x, y, x + placard_w, y + placard_h))
@@ -195,6 +201,10 @@ def estimate_total_capacity(
     total_fit = 0
     any_polygon = False
 
+    # Single reserved map shared across ALL regions — prevents placements
+    # from different detected regions from overlapping each other.
+    global_reserved = np.zeros((img_h, img_w), dtype=np.uint8)
+
     for idx, region_pred in enumerate(valid_regions):
         region_mask, used_polygon = build_region_mask(
             region_pred, img_h, img_w, margin=margin
@@ -203,7 +213,8 @@ def estimate_total_capacity(
             any_polygon = True
 
         placements = place_rectangles_in_region(
-            region_mask, placard_w, placard_h, spacing=spacing
+            region_mask, placard_w, placard_h, spacing=spacing,
+            global_reserved=global_reserved,
         )
 
         count = len(placements)
