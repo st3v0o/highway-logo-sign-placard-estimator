@@ -89,18 +89,6 @@ st.set_page_config(
     layout="wide",
 )
 
-st.markdown("""
-<style>
-[data-testid="stStatusWidget"] {
-    position: fixed !important;
-    top: 50% !important;
-    left: 50% !important;
-    right: auto !important;
-    transform: translate(-50%, -50%) scale(4) !important;
-    z-index: 9999 !important;
-}
-</style>
-""", unsafe_allow_html=True)
 
 st.title("Highway Logo Sign — Placard Capacity Estimator")
 st.caption(
