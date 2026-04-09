@@ -16,7 +16,12 @@ from typing import Optional
 
 import numpy as np
 
-from geometry import bbox_to_xyxy, prediction_to_mask, compute_region_homography
+from geometry import (
+    bbox_to_xyxy,
+    prediction_to_mask,
+    compute_region_homography,
+    simplify_polygon_to_quad,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -215,15 +220,27 @@ def place_rectangles_perspective_aware(
       4. Warp each fitted rectangle's corners back through the inverse homography.
       5. Return the resulting quadrilaterals (as lists of 4 [x, y] pairs).
 
-    Falls back and returns [] if the region does not have exactly 4 polygon points.
+    Falls back and returns [] if the region has no polygon points or the polygon
+    cannot be reduced to a valid quadrilateral.
+
+    Works with any polygon shape — multi-point rounded polygons are first
+    simplified to their 4 dominant corners via convex hull approximation.
 
     Quad winding order: TL → TR → BR → BL (matches order_points convention).
     """
     import cv2
 
-    points = region_pred.get("points", [])
-    if len(points) != 4:
+    raw_points = region_pred.get("points", [])
+    if len(raw_points) < 3:
         return []
+
+    # Simplify to exactly 4 corners (handles both 4-point and multi-point polygons)
+    if len(raw_points) == 4:
+        points = raw_points
+    else:
+        points = simplify_polygon_to_quad(raw_points)
+        if points is None:
+            return []
 
     H, H_inv, dst_w, dst_h = compute_region_homography(points)
 
@@ -329,12 +346,21 @@ def estimate_total_capacity(
         region_pred = scale_region_prediction(region_pred, empty_space_scale)
 
         points = region_pred.get("points", [])
-        use_perspective = perspective_mode and len(points) == 4
+        use_perspective = perspective_mode and len(points) >= 3
         used_perspective = False
         quad_placements: list[list[list[float]]] = []
         placements: list[tuple[int, int, int, int]] = []
 
+        # Compute simplified 4-corner quad for perspective (used for viz + fitting)
+        detected_quad = None
         if use_perspective:
+            raw_pts = points
+            if len(raw_pts) == 4:
+                detected_quad = raw_pts
+            else:
+                detected_quad = simplify_polygon_to_quad(raw_pts)
+
+        if use_perspective and detected_quad is not None:
             quad_placements = place_rectangles_perspective_aware(
                 region_pred,
                 placard_w,
@@ -381,6 +407,7 @@ def estimate_total_capacity(
             "count": count,
             "placements": placements,
             "quad_placements": quad_placements,
+            "detected_quad": detected_quad,
             "used_polygon": used_polygon,
             "used_perspective": used_perspective,
         })

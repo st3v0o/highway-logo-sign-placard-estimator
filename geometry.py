@@ -91,6 +91,56 @@ def prediction_to_mask(pred: dict, img_h: int, img_w: int) -> tuple[np.ndarray, 
 # Perspective / homography helpers
 # ---------------------------------------------------------------------------
 
+def simplify_polygon_to_quad(points: list[dict]) -> list[dict] | None:
+    """
+    Reduce an arbitrary polygon to exactly 4 corner points.
+
+    Strategy:
+      1. Compute convex hull of all points.
+      2. Try progressively larger epsilon values with approxPolyDP until we get 4 vertices.
+      3. If that fails, fall back to picking the 4 most extreme points from the hull.
+
+    Returns a list of 4 {"x", "y"} dicts, or None if reduction is not possible.
+    """
+    pts = np.array([[p["x"], p["y"]] for p in points], dtype=np.float32)
+    hull = cv2.convexHull(pts)
+
+    peri = cv2.arcLength(hull, True)
+    for scale in [0.02, 0.04, 0.06, 0.08, 0.10, 0.13, 0.16, 0.20, 0.25]:
+        epsilon = scale * peri
+        approx = cv2.approxPolyDP(hull, epsilon, True)
+        if len(approx) == 4:
+            return [{"x": float(p[0][0]), "y": float(p[0][1])} for p in approx]
+
+    # Fall back: pick the 4 most extreme directions from the hull
+    hull_pts = hull.reshape(-1, 2)
+    if len(hull_pts) >= 4:
+        return _four_extreme_hull_points(hull_pts)
+
+    return None
+
+
+def _four_extreme_hull_points(pts: np.ndarray) -> list[dict]:
+    """
+    Select 4 representative corner points from a convex hull using coordinate
+    sums/differences (same heuristic as order_points).
+
+    Returns them in [TL, TR, BR, BL] order.
+    """
+    s = pts.sum(axis=1)
+    d = pts[:, 0] - pts[:, 1]
+    tl = pts[int(np.argmin(s))]
+    br = pts[int(np.argmax(s))]
+    tr = pts[int(np.argmax(d))]
+    bl = pts[int(np.argmin(d))]
+    return [
+        {"x": float(tl[0]), "y": float(tl[1])},
+        {"x": float(tr[0]), "y": float(tr[1])},
+        {"x": float(br[0]), "y": float(br[1])},
+        {"x": float(bl[0]), "y": float(bl[1])},
+    ]
+
+
 def order_points(pts: np.ndarray) -> np.ndarray:
     """
     Order an array of 4 (x, y) points as [top-left, top-right, bottom-right, bottom-left].

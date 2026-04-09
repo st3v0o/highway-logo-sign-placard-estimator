@@ -18,6 +18,7 @@ COLOR_PLACARD = (0, 200, 0)         # Green  — existing placards
 COLOR_EMPTY_REGION = (0, 140, 255)  # Orange — empty regions (bbox fallback)
 COLOR_EMPTY_POLYGON = (0, 100, 255) # Orange-red — empty regions (polygon mode)
 COLOR_PROPOSED = (220, 200, 0)      # Cyan  — proposed new placements
+COLOR_PERSP_QUAD = (0, 230, 255)    # Yellow — detected perspective quad corners
 
 
 def draw_placards(
@@ -85,6 +86,19 @@ def draw_proposed_placements(
     img_h, img_w = img.shape[:2]
 
     for region in per_region:
+        # Draw the detected perspective quad (4-corner approximation) in yellow
+        detected_quad = region.get("detected_quad")
+        if detected_quad and region.get("used_perspective"):
+            quad_pts = np.array(
+                [[int(round(p["x"])), int(round(p["y"]))] for p in detected_quad],
+                dtype=np.int32,
+            )
+            cv2.polylines(img, [quad_pts], isClosed=True,
+                          color=COLOR_PERSP_QUAD, thickness=max(thickness, 2))
+            # Mark each corner with a small circle
+            for pt in quad_pts:
+                cv2.circle(img, tuple(pt), 6, COLOR_PERSP_QUAD, -1)
+
         if region.get("used_perspective") and region.get("quad_placements"):
             # Draw perspective-corrected quadrilaterals
             for quad in region["quad_placements"]:
