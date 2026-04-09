@@ -225,7 +225,7 @@ if run_button and uploaded_file is not None:
 
     with col_stats:
         st.subheader("Results")
-        st.metric("Estimated New Placards", results["total_fit"])
+        st.metric("Estimated Available Positions", results["total_fit"])
         st.metric("Placard Width Used (px)", results["placard_w"])
         st.metric("Placard Height Used (px)", results["placard_h"])
 
