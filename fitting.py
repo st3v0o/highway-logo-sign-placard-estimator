@@ -201,6 +201,22 @@ def place_rectangles_in_region(
 # Perspective-aware placement
 # ---------------------------------------------------------------------------
 
+def _project_points_through_H(
+    H: np.ndarray, pts_xy: list[tuple[float, float]]
+) -> list[tuple[float, float]]:
+    """
+    Project a list of (x, y) image-space points through homography H.
+    Returns a list of (x', y') flat-space coordinates.
+    """
+    if not pts_xy:
+        return []
+    pts = np.array([[p[0], p[1]] for p in pts_xy], dtype=np.float64)
+    pts_h = np.column_stack([pts, np.ones(len(pts))])
+    out_h = (H @ pts_h.T).T
+    out = out_h[:, :2] / out_h[:, 2:3]
+    return [(float(r[0]), float(r[1])) for r in out]
+
+
 def place_rectangles_perspective_aware(
     region_pred: dict,
     placard_w: int,
@@ -211,6 +227,8 @@ def place_rectangles_perspective_aware(
     margin: int = 0,
     global_reserved: np.ndarray | None = None,
     sign_homography: tuple | None = None,
+    grid_mode: bool = False,
+    placard_predictions: list[dict] | None = None,
 ) -> list[list[list[float]]]:
     """
     Perspective-aware placement for empty regions.
@@ -218,14 +236,16 @@ def place_rectangles_perspective_aware(
     Algorithm:
       1. Compute (or use a provided) homography from the sign's perspective quad to flat.
       2. Warp the region mask into the flat rectangle space.
-      3. Fit standard rectangular placards in the warped (flat) space.
+      3. Fit standard rectangular placards in the warped (flat) space
+         — either via greedy scan (default) or grid-aligned placement (grid_mode).
+         Grid mode projects existing placard centers through H to derive a uniform
+         row/column grid in flat space, then places only at grid intersections.
       4. Warp each fitted rectangle's corners back through the inverse homography.
       5. Return the resulting quadrilaterals (as lists of 4 [x, y] pairs).
 
     sign_homography: optional pre-computed (H, H_inv, dst_w, dst_h) derived from
         the actual blue sign pixels. When provided, this is used instead of
-        computing a local homography from the region polygon's corners. This gives
-        correct perspective scaling based on the real sign geometry.
+        computing a local homography from the region polygon's corners.
 
     Falls back and returns [] if no usable homography can be determined.
     """
@@ -257,10 +277,25 @@ def place_rectangles_perspective_aware(
         kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
         warped_mask = _safe_erode(warped_mask, kernel)
 
-    # Fit rectangles in the flat space (no global_reserved here — handled below)
-    flat_placements = place_rectangles_in_region(
-        warped_mask, placard_w, placard_h, spacing=spacing
-    )
+    # Fit rectangles in the flat space
+    if grid_mode and placard_predictions:
+        # Project existing placard centers through H into flat space,
+        # then derive a uniform row/column grid from their flat positions.
+        img_centers = [(float(p["x"]), float(p["y"])) for p in placard_predictions]
+        flat_centers = _project_points_through_H(H, img_centers)
+        # Build synthetic prediction dicts for infer_and_extend_grid
+        flat_preds = [{"x": c[0], "y": c[1]} for c in flat_centers]
+        flat_rows, flat_cols = infer_and_extend_grid(
+            flat_preds, placard_w, placard_h, spacing, dst_w, dst_h
+        )
+        flat_placements = place_on_grid(
+            flat_rows, flat_cols, placard_w, placard_h, warped_mask
+        )
+    else:
+        # Greedy scan in flat space
+        flat_placements = place_rectangles_in_region(
+            warped_mask, placard_w, placard_h, spacing=spacing
+        )
 
     # Warp each fitted rectangle back to image space as a quadrilateral
     quads: list[list[list[float]]] = []
@@ -523,6 +558,8 @@ def estimate_total_capacity(
                 margin=margin,
                 global_reserved=global_reserved,
                 sign_homography=sign_homography,  # None → falls back to polygon
+                grid_mode=grid_mode,
+                placard_predictions=placard_predictions,
             )
             if quad_placements:
                 used_perspective = True
