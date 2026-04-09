@@ -47,3 +47,6 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# App settings (contains API keys — do not commit)
+settings.json

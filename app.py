@@ -10,6 +10,9 @@ Workflow:
   4. View annotated image, fit count, and debug info
 """
 
+import json
+import os
+
 import streamlit as st
 from PIL import Image
 
@@ -21,6 +24,58 @@ from roboflow_client import (
 )
 from fitting import estimate_total_capacity
 from visualize import render_annotated_image
+
+
+# ---------------------------------------------------------------------------
+# Settings persistence helpers
+# ---------------------------------------------------------------------------
+
+SETTINGS_FILE = "settings.json"
+
+DEFAULTS = {
+    "api_key": "",
+    "placard_workspace": "",
+    "placard_project": "",
+    "placard_version": 1,
+    "same_workspace": True,
+    "empty_workspace": "",
+    "empty_project": "",
+    "empty_version": 1,
+    "mock_mode": True,
+    "estimate_from_detections": True,
+    "default_placard_w": 90,
+    "default_placard_h": 70,
+    "outer_margin": 8,
+    "spacing": 4,
+    "min_confidence": 0.4,
+}
+
+
+def load_settings() -> dict:
+    """Load saved settings from disk, falling back to defaults for any missing keys."""
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                saved = json.load(f)
+            # Merge with defaults so new keys added in future versions are included
+            return {**DEFAULTS, **saved}
+        except Exception:
+            pass
+    return dict(DEFAULTS)
+
+
+def save_settings(values: dict) -> None:
+    """Write current settings to disk."""
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(values, f, indent=2)
+
+
+# Load saved settings once per session (not on every rerun)
+if "settings_loaded" not in st.session_state:
+    saved = load_settings()
+    for k, v in saved.items():
+        st.session_state[k] = v
+    st.session_state["settings_loaded"] = True
 
 
 # ---------------------------------------------------------------------------
@@ -49,21 +104,21 @@ with st.sidebar:
 
     mock_mode = st.checkbox(
         "Mock Mode (no API calls)",
-        value=True,
+        key="mock_mode",
         help="Uses hardcoded sample predictions so you can test without a Roboflow account.",
     )
 
     st.divider()
     st.subheader("Roboflow API Key")
-    api_key = st.text_input("API Key", type="password", disabled=mock_mode)
+    api_key = st.text_input("API Key", key="api_key", type="password", disabled=mock_mode)
 
     st.divider()
     st.subheader("Placard Detection Model")
-    placard_workspace = st.text_input("Workspace ID", key="p_ws", disabled=mock_mode)
-    placard_project = st.text_input("Project ID", key="p_proj", disabled=mock_mode)
-    placard_version = st.number_input("Version", min_value=1, value=1, step=1, key="p_ver", disabled=mock_mode)
+    placard_workspace = st.text_input("Workspace ID", key="placard_workspace", disabled=mock_mode)
+    placard_project = st.text_input("Project ID", key="placard_project", disabled=mock_mode)
+    placard_version = st.number_input("Version", min_value=1, step=1, key="placard_version", disabled=mock_mode)
 
-    same_workspace = st.checkbox("Use same workspace for both models", value=True, disabled=mock_mode)
+    same_workspace = st.checkbox("Use same workspace for both models", key="same_workspace", disabled=mock_mode)
 
     st.divider()
     st.subheader("Empty-Space Detection Model")
@@ -71,44 +126,65 @@ with st.sidebar:
         empty_workspace = placard_workspace
         st.text_input("Workspace ID (same as above)", value=placard_workspace, disabled=True)
     else:
-        empty_workspace = st.text_input("Workspace ID", key="e_ws", disabled=mock_mode)
+        empty_workspace = st.text_input("Workspace ID", key="empty_workspace", disabled=mock_mode)
 
-    empty_project = st.text_input("Project ID", key="e_proj", disabled=mock_mode)
-    empty_version = st.number_input("Version", min_value=1, value=1, step=1, key="e_ver", disabled=mock_mode)
+    empty_project = st.text_input("Project ID", key="empty_project", disabled=mock_mode)
+    empty_version = st.number_input("Version", min_value=1, step=1, key="empty_version", disabled=mock_mode)
 
     st.divider()
     st.subheader("Placard Size")
     estimate_from_detections = st.checkbox(
         "Estimate placard size from detected placards",
-        value=True,
+        key="estimate_from_detections",
         help="Uses the median size of existing detected placards as the template size.",
     )
-    default_placard_w = st.number_input("Default width (px)", min_value=10, value=90, step=5)
-    default_placard_h = st.number_input("Default height (px)", min_value=10, value=70, step=5)
+    default_placard_w = st.number_input("Default width (px)", min_value=10, step=5, key="default_placard_w")
+    default_placard_h = st.number_input("Default height (px)", min_value=10, step=5, key="default_placard_h")
 
     st.divider()
     st.subheader("Layout Parameters")
     outer_margin = st.number_input(
         "Outer margin (px)",
         min_value=0,
-        value=8,
         step=2,
+        key="outer_margin",
         help="Minimum gap between a placard and the edge of the empty region.",
     )
     spacing = st.number_input(
         "Spacing between placards (px)",
         min_value=0,
-        value=4,
         step=2,
+        key="spacing",
         help="Gap between adjacent proposed placards.",
     )
     min_confidence = st.slider(
         "Minimum confidence",
         min_value=0.0,
         max_value=1.0,
-        value=0.4,
         step=0.05,
+        key="min_confidence",
     )
+
+    st.divider()
+    if st.button("Save Settings", use_container_width=True):
+        save_settings({
+            "api_key": st.session_state.api_key,
+            "placard_workspace": st.session_state.placard_workspace,
+            "placard_project": st.session_state.placard_project,
+            "placard_version": int(st.session_state.placard_version),
+            "same_workspace": st.session_state.same_workspace,
+            "empty_workspace": st.session_state.get("empty_workspace", ""),
+            "empty_project": st.session_state.empty_project,
+            "empty_version": int(st.session_state.empty_version),
+            "mock_mode": st.session_state.mock_mode,
+            "estimate_from_detections": st.session_state.estimate_from_detections,
+            "default_placard_w": int(st.session_state.default_placard_w),
+            "default_placard_h": int(st.session_state.default_placard_h),
+            "outer_margin": int(st.session_state.outer_margin),
+            "spacing": int(st.session_state.spacing),
+            "min_confidence": float(st.session_state.min_confidence),
+        })
+        st.success("Settings saved!")
 
 
 # ---------------------------------------------------------------------------
