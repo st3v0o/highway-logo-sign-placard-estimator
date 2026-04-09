@@ -170,15 +170,19 @@ def estimate_total_capacity(
     spacing: int = 4,
     min_confidence: float = 0.4,
     estimate_size_from_detections: bool = True,
+    placard_scale: float = 1.0,
 ) -> dict:
     """
     Estimate how many new placards can fit in the detected empty regions.
 
+    placard_scale: multiplier applied to the final placard size (0.0–1.0).
+    Values below 1.0 allow placards to fit into tighter spaces.
+
     Returns a dict with:
       - total_fit: int
       - per_region: list of {"region_index": int, "count": int, "placements": [...]}
-      - placard_w: int (width used)
-      - placard_h: int (height used)
+      - placard_w: int (width used after scaling)
+      - placard_h: int (height used after scaling)
       - used_polygon: bool (True if at least one region used polygon mode)
     """
     # Determine placard size
@@ -190,6 +194,10 @@ def estimate_total_capacity(
         )
         if estimated:
             placard_w, placard_h = estimated
+
+    # Apply scale factor
+    placard_w = max(1, int(placard_w * placard_scale))
+    placard_h = max(1, int(placard_h * placard_scale))
 
     # Filter empty regions by confidence
     valid_regions = [

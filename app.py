@@ -48,6 +48,7 @@ DEFAULTS = {
     "outer_margin": 8,
     "spacing": 4,
     "min_confidence": 0.4,
+    "placard_scale": 100,
 }
 
 
@@ -140,6 +141,15 @@ with st.sidebar:
     )
     default_placard_w = st.number_input("Default width (px)", min_value=10, step=5, key="default_placard_w")
     default_placard_h = st.number_input("Default height (px)", min_value=10, step=5, key="default_placard_h")
+    placard_scale = st.slider(
+        "Placard scale (%)",
+        min_value=30,
+        max_value=100,
+        step=5,
+        key="placard_scale",
+        help="Scale the fitting rectangle down from the estimated/default size. "
+             "Lower values let placards fit into tighter spaces.",
+    )
 
     st.divider()
     st.subheader("Layout Parameters")
@@ -183,6 +193,7 @@ with st.sidebar:
             "outer_margin": int(st.session_state.outer_margin),
             "spacing": int(st.session_state.spacing),
             "min_confidence": float(st.session_state.min_confidence),
+            "placard_scale": int(st.session_state.placard_scale),
         })
         st.success("Settings saved!")
 
@@ -272,6 +283,7 @@ if run_button and uploaded_file is not None:
         spacing=int(spacing),
         min_confidence=min_confidence,
         estimate_size_from_detections=estimate_from_detections,
+        placard_scale=placard_scale / 100.0,
     )
 
     # Render annotated image
