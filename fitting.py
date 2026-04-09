@@ -6,13 +6,17 @@ Placard fitting logic.
 For each empty region, scans left-to-right, top-to-bottom and greedily places
 full placard rectangles inside the region mask, respecting outer margin and
 inter-placard spacing.
+
+Perspective-aware mode: when a region has exactly 4 polygon points, the region
+is warped to a flat rectangle via homography, rectangles are fitted there, and
+the corners are warped back to quadrilaterals that respect the camera angle.
 """
 
 from typing import Optional
 
 import numpy as np
 
-from geometry import bbox_to_xyxy, prediction_to_mask
+from geometry import bbox_to_xyxy, prediction_to_mask, compute_region_homography
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +166,6 @@ def place_rectangles_in_region(
 
     img_h, img_w = mask.shape
 
-    # Use the shared global reserved array if provided, otherwise a local one.
     reserved = global_reserved if global_reserved is not None else np.zeros((img_h, img_w), dtype=np.uint8)
     placements: list[tuple[int, int, int, int]] = []
 
@@ -172,12 +175,9 @@ def place_rectangles_in_region(
     while y + placard_h <= img_h:
         x = 0
         while x + placard_w <= img_w:
-            # Check the ENTIRE proposed rectangle footprint is unreserved
-            # across all regions (not just the top-left corner).
             footprint_clear = np.all(reserved[y:y + placard_h, x:x + placard_w] == 0)
             if footprint_clear and can_place_rectangle(mask, x, y, placard_w, placard_h):
                 placements.append((x, y, x + placard_w, y + placard_h))
-                # Mark reserved area (placard + spacing on all sides)
                 rx1 = max(0, x - spacing)
                 ry1 = max(0, y - spacing)
                 rx2 = min(img_w, x + placard_w + spacing)
@@ -189,6 +189,76 @@ def place_rectangles_in_region(
         y += 1
 
     return placements
+
+
+# ---------------------------------------------------------------------------
+# Perspective-aware placement
+# ---------------------------------------------------------------------------
+
+def place_rectangles_perspective_aware(
+    region_pred: dict,
+    placard_w: int,
+    placard_h: int,
+    img_h: int,
+    img_w: int,
+    spacing: int = 4,
+    margin: int = 0,
+    global_reserved: np.ndarray | None = None,
+) -> list[list[list[float]]]:
+    """
+    Perspective-aware placement for regions with exactly 4 polygon points.
+
+    Algorithm:
+      1. Compute homography from the 4-corner trapezoid to a flat rectangle.
+      2. Warp the region mask into the flat rectangle space.
+      3. Fit standard rectangular placards in the warped (flat) space.
+      4. Warp each fitted rectangle's corners back through the inverse homography.
+      5. Return the resulting quadrilaterals (as lists of 4 [x, y] pairs).
+
+    Falls back and returns [] if the region does not have exactly 4 polygon points.
+
+    Quad winding order: TL → TR → BR → BL (matches order_points convention).
+    """
+    import cv2
+
+    points = region_pred.get("points", [])
+    if len(points) != 4:
+        return []
+
+    H, H_inv, dst_w, dst_h = compute_region_homography(points)
+
+    # Build region mask in original image space and warp to flat rectangle
+    orig_mask, _ = prediction_to_mask(region_pred, img_h, img_w)
+    warped_mask = cv2.warpPerspective(orig_mask, H, (dst_w, dst_h),
+                                      flags=cv2.INTER_NEAREST)
+
+    # Apply margin in the warped (flat) space
+    if margin > 0:
+        kernel_size = 2 * margin + 1
+        kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+        warped_mask = _safe_erode(warped_mask, kernel)
+
+    # Fit rectangles in the flat space (no global_reserved here — handled below)
+    flat_placements = place_rectangles_in_region(
+        warped_mask, placard_w, placard_h, spacing=spacing
+    )
+
+    # Warp each fitted rectangle back to image space as a quadrilateral
+    quads: list[list[list[float]]] = []
+    for (x1, y1, x2, y2) in flat_placements:
+        corners = np.array(
+            [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32
+        ).reshape(-1, 1, 2)
+        warped_corners = cv2.perspectiveTransform(corners, H_inv).reshape(-1, 2)
+        quad = warped_corners.tolist()
+        quads.append(quad)
+
+        # Mark the quad footprint on the global reserved array (image space)
+        if global_reserved is not None:
+            pts_int = warped_corners.astype(np.int32)
+            cv2.fillConvexPoly(global_reserved, pts_int, 1)
+
+    return quads
 
 
 # ---------------------------------------------------------------------------
@@ -208,23 +278,25 @@ def estimate_total_capacity(
     estimate_size_from_detections: bool = True,
     placard_scale: float = 1.0,
     empty_space_scale: float = 1.0,
+    perspective_mode: bool = False,
 ) -> dict:
     """
     Estimate how many new placards can fit in the detected empty regions.
 
     placard_scale: multiplier applied to the final placard size (0.0–1.0).
-    Values below 1.0 allow placards to fit into tighter spaces.
-
-    empty_space_scale: multiplier applied to each detected empty region's
-    dimensions from its center (0.0–1.0). Values below 1.0 shrink the
-    usable area, reducing how many placards fit per region.
+    empty_space_scale: multiplier applied to each region's dimensions from its center.
+    perspective_mode: if True and a region has exactly 4 polygon points, uses
+        perspective-aware fitting — warps the trapezoid flat, fits rectangles,
+        then warps them back as quads that match the camera angle.
 
     Returns a dict with:
       - total_fit: int
-      - per_region: list of {"region_index": int, "count": int, "placements": [...]}
-      - placard_w: int (width used after scaling)
-      - placard_h: int (height used after scaling)
-      - used_polygon: bool (True if at least one region used polygon mode)
+      - per_region: list of region dicts, each containing:
+          "region_index", "count", "placements" (rects), "quad_placements" (quads),
+          "used_polygon", "used_perspective"
+      - placard_w, placard_h: ints (dimensions used after scaling)
+      - used_polygon_mode: bool
+      - used_perspective_mode: bool
     """
     # Determine placard size
     placard_w = default_placard_w
@@ -249,31 +321,68 @@ def estimate_total_capacity(
     per_region = []
     total_fit = 0
     any_polygon = False
+    any_perspective = False
 
-    # Single reserved map shared across ALL regions — prevents placements
-    # from different detected regions from overlapping each other.
     global_reserved = np.zeros((img_h, img_w), dtype=np.uint8)
 
     for idx, region_pred in enumerate(valid_regions):
         region_pred = scale_region_prediction(region_pred, empty_space_scale)
-        region_mask, used_polygon = build_region_mask(
-            region_pred, img_h, img_w, margin=margin
-        )
-        if used_polygon:
-            any_polygon = True
 
-        placements = place_rectangles_in_region(
-            region_mask, placard_w, placard_h, spacing=spacing,
-            global_reserved=global_reserved,
-        )
+        points = region_pred.get("points", [])
+        use_perspective = perspective_mode and len(points) == 4
+        used_perspective = False
+        quad_placements: list[list[list[float]]] = []
+        placements: list[tuple[int, int, int, int]] = []
 
-        count = len(placements)
+        if use_perspective:
+            quad_placements = place_rectangles_perspective_aware(
+                region_pred,
+                placard_w,
+                placard_h,
+                img_h=img_h,
+                img_w=img_w,
+                spacing=spacing,
+                margin=margin,
+                global_reserved=global_reserved,
+            )
+            if quad_placements:
+                used_perspective = True
+                any_perspective = True
+                count = len(quad_placements)
+                used_polygon = True
+                any_polygon = True
+            else:
+                # Fall back to standard fitting
+                region_mask, used_polygon = build_region_mask(
+                    region_pred, img_h, img_w, margin=margin
+                )
+                if used_polygon:
+                    any_polygon = True
+                placements = place_rectangles_in_region(
+                    region_mask, placard_w, placard_h, spacing=spacing,
+                    global_reserved=global_reserved,
+                )
+                count = len(placements)
+        else:
+            region_mask, used_polygon = build_region_mask(
+                region_pred, img_h, img_w, margin=margin
+            )
+            if used_polygon:
+                any_polygon = True
+            placements = place_rectangles_in_region(
+                region_mask, placard_w, placard_h, spacing=spacing,
+                global_reserved=global_reserved,
+            )
+            count = len(placements)
+
         total_fit += count
         per_region.append({
             "region_index": idx,
             "count": count,
             "placements": placements,
+            "quad_placements": quad_placements,
             "used_polygon": used_polygon,
+            "used_perspective": used_perspective,
         })
 
     return {
@@ -282,4 +391,5 @@ def estimate_total_capacity(
         "placard_w": placard_w,
         "placard_h": placard_h,
         "used_polygon_mode": any_polygon,
+        "used_perspective_mode": any_perspective,
     }

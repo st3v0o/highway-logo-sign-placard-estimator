@@ -14,10 +14,10 @@ from geometry import bbox_to_xyxy, clip_to_image_bounds
 
 
 # Color constants (BGR for OpenCV)
-COLOR_PLACARD = (0, 200, 0)        # Green — existing placards
-COLOR_EMPTY_REGION = (0, 140, 255) # Orange — empty regions (bbox fallback)
+COLOR_PLACARD = (0, 200, 0)         # Green  — existing placards
+COLOR_EMPTY_REGION = (0, 140, 255)  # Orange — empty regions (bbox fallback)
 COLOR_EMPTY_POLYGON = (0, 100, 255) # Orange-red — empty regions (polygon mode)
-COLOR_PROPOSED = (220, 200, 0)     # Cyan — proposed new placements
+COLOR_PROPOSED = (220, 200, 0)      # Cyan  — proposed new placements
 
 
 def draw_placards(
@@ -26,9 +26,7 @@ def draw_placards(
     min_confidence: float = 0.0,
     thickness: int = 2,
 ) -> np.ndarray:
-    """
-    Draw existing placard detections in red on the image.
-    """
+    """Draw existing placard detections in green on the image."""
     img_h, img_w = img.shape[:2]
     for pred in predictions:
         if pred.get("confidence", 0) < min_confidence:
@@ -49,8 +47,8 @@ def draw_empty_regions(
     thickness: int = 2,
 ) -> np.ndarray:
     """
-    Draw empty-space detections. Uses polygon outline (green) if points are
-    available, otherwise draws a bounding box (yellow).
+    Draw empty-space detections. Uses polygon outline if points are available,
+    otherwise draws a bounding box.
     """
     img_h, img_w = img.shape[:2]
     for pred in predictions:
@@ -81,13 +79,24 @@ def draw_proposed_placements(
     """
     Draw proposed new placard placements in cyan.
 
-    per_region: list of region result dicts from estimate_total_capacity()
+    For perspective-aware regions (used_perspective=True) draws quadrilaterals
+    from quad_placements. Falls back to drawing rectangles from placements.
     """
     img_h, img_w = img.shape[:2]
+
     for region in per_region:
-        for x1, y1, x2, y2 in region.get("placements", []):
-            x1, y1, x2, y2 = clip_to_image_bounds(x1, y1, x2, y2, img_w, img_h)
-            cv2.rectangle(img, (x1, y1), (x2, y2), COLOR_PROPOSED, thickness)
+        if region.get("used_perspective") and region.get("quad_placements"):
+            # Draw perspective-corrected quadrilaterals
+            for quad in region["quad_placements"]:
+                pts = np.array([[int(round(p[0])), int(round(p[1]))] for p in quad],
+                               dtype=np.int32)
+                cv2.polylines(img, [pts], isClosed=True, color=COLOR_PROPOSED, thickness=thickness)
+        else:
+            # Draw standard rectangles
+            for x1, y1, x2, y2 in region.get("placements", []):
+                x1, y1, x2, y2 = clip_to_image_bounds(x1, y1, x2, y2, img_w, img_h)
+                cv2.rectangle(img, (x1, y1), (x2, y2), COLOR_PROPOSED, thickness)
+
     return img
 
 
@@ -104,7 +113,6 @@ def render_annotated_image(
     Drawing order: empty regions → existing placards → proposed placements
     so that proposals appear on top.
     """
-    # Convert PIL -> OpenCV BGR
     img_rgb = np.array(pil_image.convert("RGB"))
     img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
@@ -112,6 +120,5 @@ def render_annotated_image(
     img = draw_placards(img, placard_predictions, min_confidence)
     img = draw_proposed_placements(img, per_region)
 
-    # Convert back to PIL RGB
     img_rgb_out = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     return Image.fromarray(img_rgb_out)

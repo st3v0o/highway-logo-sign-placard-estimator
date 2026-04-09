@@ -51,6 +51,7 @@ DEFAULTS = {
     "min_confidence": 0.4,
     "placard_scale": 100,
     "empty_space_scale": 100,
+    "perspective_mode": False,
 }
 
 
@@ -159,6 +160,16 @@ with st.sidebar:
         key="empty_space_scale",
         help="Shrinks each detected empty region from its center. Lower values reduce the usable area, fitting fewer placards per region. Updates live after inference.",
     )
+    perspective_mode = st.checkbox(
+        "Perspective-aware fitting",
+        key="perspective_mode",
+        help=(
+            "When enabled and a detected region has exactly 4 polygon corners, "
+            "the region is un-warped to a flat rectangle, placards are fitted there, "
+            "and their outlines are warped back as trapezoids matching the camera angle. "
+            "Requires your detection model to return polygon (not just bounding-box) outputs."
+        ),
+    )
 
     st.divider()
     st.subheader("Layout Parameters")
@@ -204,6 +215,7 @@ with st.sidebar:
             "min_confidence": float(st.session_state.min_confidence),
             "placard_scale": int(st.session_state.placard_scale),
             "empty_space_scale": int(st.session_state.empty_space_scale),
+            "perspective_mode": bool(st.session_state.perspective_mode),
         })
         st.success("Settings saved!")
 
@@ -323,6 +335,7 @@ if "last_placard_preds" in st.session_state:
         estimate_size_from_detections=estimate_from_detections,
         placard_scale=placard_scale / 100.0,
         empty_space_scale=empty_space_scale / 100.0,
+        perspective_mode=perspective_mode,
     )
 
     # Re-render annotated image with current placements
@@ -367,7 +380,8 @@ if "last_placard_preds" in st.session_state:
     debug_cols[0].metric("Placards Detected", len(placard_preds_filtered))
     debug_cols[1].metric("Empty Regions Detected", len(empty_preds_filtered))
     debug_cols[2].info(
-        "Polygon mode" if results["used_polygon_mode"] else "Bbox fallback"
+        "Perspective mode" if results["used_perspective_mode"]
+        else ("Polygon mode" if results["used_polygon_mode"] else "Bbox fallback")
     )
     debug_cols[3].metric("Regions with fits", sum(1 for r in results["per_region"] if r["count"] > 0))
 
@@ -377,7 +391,10 @@ if "last_placard_preds" in st.session_state:
             {
                 "Region": f"Region {r['region_index'] + 1}",
                 "Placards fit": r["count"],
-                "Mode": "polygon" if r.get("used_polygon") else "bbox",
+                "Mode": (
+                    "perspective" if r.get("used_perspective")
+                    else ("polygon" if r.get("used_polygon") else "bbox")
+                ),
             }
             for r in results["per_region"]
         ]
