@@ -50,6 +50,7 @@ DEFAULTS = {
     "spacing": 4,
     "min_confidence": 0.4,
     "placard_scale": 100,
+    "empty_space_scale": 100,
 }
 
 
@@ -150,6 +151,14 @@ with st.sidebar:
         key="placard_scale",
         help="Scales the fitting rectangle. Lower values fit placards into tighter spaces. Updates live after inference.",
     )
+    empty_space_scale = st.slider(
+        "Empty space scale (%)",
+        min_value=30,
+        max_value=100,
+        step=5,
+        key="empty_space_scale",
+        help="Shrinks each detected empty region from its center. Lower values reduce the usable area, fitting fewer placards per region. Updates live after inference.",
+    )
 
     st.divider()
     st.subheader("Layout Parameters")
@@ -194,6 +203,7 @@ with st.sidebar:
             "spacing": int(st.session_state.spacing),
             "min_confidence": float(st.session_state.min_confidence),
             "placard_scale": int(st.session_state.placard_scale),
+            "empty_space_scale": int(st.session_state.empty_space_scale),
         })
         st.success("Settings saved!")
 
@@ -312,6 +322,7 @@ if "last_placard_preds" in st.session_state:
         min_confidence=0.0,  # already pre-filtered
         estimate_size_from_detections=estimate_from_detections,
         placard_scale=placard_scale / 100.0,
+        empty_space_scale=empty_space_scale / 100.0,
     )
 
     # Re-render annotated image with current placements

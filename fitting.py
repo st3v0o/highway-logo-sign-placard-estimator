@@ -44,6 +44,42 @@ def estimate_placard_size_from_detections(
 
 
 # ---------------------------------------------------------------------------
+# Region scaling helper
+# ---------------------------------------------------------------------------
+
+def scale_region_prediction(pred: dict, scale: float) -> dict:
+    """
+    Shrink a region prediction from its center by *scale* (0.0–1.0).
+
+    Works for both bbox-only and polygon predictions:
+      - bbox: width and height are multiplied by scale (center x/y unchanged).
+      - polygon: each point is moved toward the centroid by scale.
+
+    Returns a shallow-copy of pred with modified fields.
+    """
+    if scale >= 1.0:
+        return pred
+
+    new_pred = dict(pred)
+    cx = pred["x"]
+    cy = pred["y"]
+
+    # Scale bbox dimensions
+    new_pred["width"] = pred["width"] * scale
+    new_pred["height"] = pred["height"] * scale
+
+    # Scale polygon points if present
+    points = pred.get("points")
+    if points and len(points) >= 3:
+        new_pred["points"] = [
+            {"x": cx + (p["x"] - cx) * scale, "y": cy + (p["y"] - cy) * scale}
+            for p in points
+        ]
+
+    return new_pred
+
+
+# ---------------------------------------------------------------------------
 # Mask builder
 # ---------------------------------------------------------------------------
 
@@ -171,12 +207,17 @@ def estimate_total_capacity(
     min_confidence: float = 0.4,
     estimate_size_from_detections: bool = True,
     placard_scale: float = 1.0,
+    empty_space_scale: float = 1.0,
 ) -> dict:
     """
     Estimate how many new placards can fit in the detected empty regions.
 
     placard_scale: multiplier applied to the final placard size (0.0–1.0).
     Values below 1.0 allow placards to fit into tighter spaces.
+
+    empty_space_scale: multiplier applied to each detected empty region's
+    dimensions from its center (0.0–1.0). Values below 1.0 shrink the
+    usable area, reducing how many placards fit per region.
 
     Returns a dict with:
       - total_fit: int
@@ -214,6 +255,7 @@ def estimate_total_capacity(
     global_reserved = np.zeros((img_h, img_w), dtype=np.uint8)
 
     for idx, region_pred in enumerate(valid_regions):
+        region_pred = scale_region_prediction(region_pred, empty_space_scale)
         region_mask, used_polygon = build_region_mask(
             region_pred, img_h, img_w, margin=margin
         )
