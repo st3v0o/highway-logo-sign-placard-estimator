@@ -1,0 +1,200 @@
+Build a very simple Python desktop web app for estimating how many business placards can fit in open blue sign space on a highway logo sign.
+
+Main goal:
+The app should let me upload an image, call two hosted Roboflow models directly, visualize the predictions, and calculate how many placards can fit into the detected empty blue regions.
+
+I want this to be very easy to test and run.
+
+Use Python.
+
+Preferred stack:
+- Streamlit for the GUI
+- requests
+- OpenCV
+- NumPy
+- Pillow
+
+App requirements:
+
+1. GUI
+Create a Streamlit app with:
+- image uploader (drag and drop)
+- text inputs in the sidebar for:
+  - Roboflow API key
+  - placard model workspace ID
+  - placard project ID
+  - placard version number
+  - empty-space model workspace ID
+  - empty-space project ID
+  - empty-space version number
+- optional checkbox: "Use same workspace for both models"
+- optional checkbox: "Use same API key for both models"
+- number inputs for:
+  - default placard width (pixels)
+  - default placard height (pixels)
+  - outer margin (pixels)
+  - spacing between placards (pixels)
+  - minimum confidence
+- checkbox:
+  - "Estimate placard size from detected placards"
+- button:
+  - "Run Inference"
+
+2. Hosted model calling
+The app should call Roboflow hosted inference directly using HTTP requests.
+It should support two models:
+- placard detection model
+- empty-blue-space model
+
+Create helper functions:
+- call_placard_model(...)
+- call_empty_space_model(...)
+
+The code should allow easy editing of the endpoint format in case Roboflow endpoints differ.
+
+3. Input/output assumptions
+Placard model output:
+- existing installed placards
+- usually bounding boxes
+- example prediction format:
+  {
+    "predictions": [
+      {
+        "class": "placard",
+        "x": 200,
+        "y": 120,
+        "width": 90,
+        "height": 70,
+        "confidence": 0.95
+      }
+    ]
+  }
+
+Empty-blue-space model output may be:
+- polygons
+- masks converted to polygons
+- bounding boxes as fallback
+
+The app should support:
+A) polygon predictions if available
+B) bounding boxes if polygons are not available
+
+4. Counting logic
+Do not just divide total free area by average placard area.
+
+Instead:
+- use the empty-blue-space detections as candidate install regions
+- use the placard detections to estimate standard placard size if enabled
+- otherwise use manual width/height from the GUI
+- for each empty region:
+  - create a binary mask
+  - scan the region left-to-right, top-to-bottom
+  - try placing a rectangle of placard width x placard height
+  - only count it if the full rectangle fits inside the region mask
+  - after placing one, reserve spacing around it before placing the next
+- return:
+  - total placards that can fit
+  - count per region
+  - coordinates of proposed new placard placements
+
+5. Visualization
+Display the uploaded image with overlays:
+- existing placard detections in red
+- empty-blue-space detections in yellow or green
+- proposed new placard placements in cyan
+
+Also display:
+- total estimated available placards
+- estimated placard width/height used
+- raw JSON response from each model in expandable sections
+
+6. Robustness
+- ignore predictions below min confidence
+- handle empty predictions gracefully
+- support polygon or bbox empty-space outputs
+- if only bounding boxes are available for empty-space regions, treat them as rectangular install regions
+- keep code modular and readable
+
+7. Project structure
+Create:
+- app.py
+- roboflow_client.py
+- geometry.py
+- fitting.py
+- visualize.py
+- requirements.txt
+- README.md
+
+8. In roboflow_client.py
+Create a function that builds a hosted inference URL from:
+- workspace ID
+- project ID
+- version number
+- api key
+
+Make the URL builder easy to adjust.
+
+9. In fitting.py
+Implement:
+- estimate_placard_size_from_detections()
+- build_region_mask()
+- can_place_rectangle()
+- place_rectangles_in_region()
+- estimate_total_capacity()
+
+10. In geometry.py
+Implement:
+- bbox_to_xyxy()
+- polygon_to_mask()
+- bbox_to_mask()
+- clip_to_image_bounds()
+
+11. In visualize.py
+Implement:
+- draw_placards()
+- draw_empty_regions()
+- draw_proposed_placements()
+- render_annotated_image()
+
+12. In the GUI
+Workflow should be:
+- user uploads image
+- user enters model info
+- user clicks Run Inference
+- app calls both Roboflow models
+- app parses outputs
+- app calculates fit count
+- app shows annotated result and count
+
+13. Add a debug panel
+Show:
+- number of placards detected
+- number of empty regions detected
+- whether polygon mode or bbox fallback was used
+- estimated placard size
+- count per empty region
+
+14. Make testing easy
+Include a "Mock Mode" toggle in the sidebar.
+When enabled:
+- do not call Roboflow
+- instead use hardcoded sample prediction JSON for both models
+This makes the app easy to test without API calls.
+
+15. README
+Write a simple README with:
+- how to install
+- how to run
+- how to use mock mode
+- how to enter Roboflow settings
+- how the count is estimated
+- how to adapt the hosted inference endpoint if needed
+
+Important implementation details:
+- Use Streamlit for the GUI
+- Use OpenCV and NumPy for geometry and visualization
+- Keep the UI simple and practical
+- Add comments in code
+- Add type hints where reasonable
+- Do not over-engineer
+- Focus on making it easy to test with uploaded images and hosted model IDs
