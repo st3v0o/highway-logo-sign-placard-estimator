@@ -89,6 +89,38 @@ st.set_page_config(
     layout="wide",
 )
 
+st.markdown("""
+<style>
+[data-testid="stSpinner"] {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    background: rgba(0, 0, 0, 0.45);
+}
+[data-testid="stSpinner"] > div {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+}
+[data-testid="stSpinner"] svg {
+    width: 120px !important;
+    height: 120px !important;
+}
+[data-testid="stSpinner"] p {
+    font-size: 1.6rem !important;
+    font-weight: 600;
+    color: #ffffff;
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.title("Highway Logo Sign — Placard Capacity Estimator")
 st.caption(
     "Upload a sign image, configure Roboflow models, and estimate how many new "
