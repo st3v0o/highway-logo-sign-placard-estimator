@@ -293,8 +293,8 @@ if run_button and uploaded_file is not None:
     with col_img:
         st.subheader("Annotated Image")
         st.caption(
-            "**Red** = existing placards   "
-            "**Yellow/Green** = empty regions (bbox/polygon)   "
+            "**Green** = existing placards   "
+            "**Orange** = empty regions   "
             "**Cyan** = proposed new placements"
         )
         st.image(annotated, use_container_width=True)

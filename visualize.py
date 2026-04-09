@@ -14,9 +14,9 @@ from geometry import bbox_to_xyxy, clip_to_image_bounds
 
 
 # Color constants (BGR for OpenCV)
-COLOR_PLACARD = (0, 0, 220)        # Red — existing placards
-COLOR_EMPTY_REGION = (0, 200, 200) # Yellow — empty regions (bbox fallback)
-COLOR_EMPTY_POLYGON = (0, 200, 60) # Green — empty regions (polygon mode)
+COLOR_PLACARD = (0, 200, 0)        # Green — existing placards
+COLOR_EMPTY_REGION = (0, 140, 255) # Orange — empty regions (bbox fallback)
+COLOR_EMPTY_POLYGON = (0, 100, 255) # Orange-red — empty regions (polygon mode)
 COLOR_PROPOSED = (220, 200, 0)     # Cyan — proposed new placements
 
 
