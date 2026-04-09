@@ -54,6 +54,7 @@ DEFAULTS = {
     "placard_scale": 100,
     "empty_space_scale": 100,
     "perspective_mode": False,
+    "grid_mode": False,
 }
 
 
@@ -172,6 +173,17 @@ with st.sidebar:
             "Requires your detection model to return polygon (not just bounding-box) outputs."
         ),
     )
+    grid_mode = st.checkbox(
+        "Grid-aligned placement",
+        key="grid_mode",
+        help=(
+            "Infers a uniform row/column grid from the positions of existing detected "
+            "placards, extends that grid across the whole sign, and proposes new placards "
+            "only at grid intersections inside empty regions. "
+            "The inferred grid lines are drawn in yellow. "
+            "Produces realistic placements that stay in line with the existing signs."
+        ),
+    )
 
     st.divider()
     st.subheader("Layout Parameters")
@@ -218,6 +230,7 @@ with st.sidebar:
             "placard_scale": int(st.session_state.placard_scale),
             "empty_space_scale": int(st.session_state.empty_space_scale),
             "perspective_mode": bool(st.session_state.perspective_mode),
+            "grid_mode": bool(st.session_state.grid_mode),
         })
         st.success("Settings saved!")
 
@@ -342,6 +355,7 @@ if "last_placard_preds" in st.session_state:
         empty_space_scale=empty_space_scale / 100.0,
         perspective_mode=perspective_mode,
         image_bgr=image_bgr,
+        grid_mode=grid_mode,
     )
 
     # Re-render annotated image with current placements
@@ -351,6 +365,7 @@ if "last_placard_preds" in st.session_state:
         empty_space_predictions=empty_preds_filtered,
         per_region=results["per_region"],
         min_confidence=0.0,
+        grid=results.get("grid"),
     )
 
     # -------------------------------------------------------------------------

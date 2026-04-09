@@ -114,21 +114,57 @@ def draw_proposed_placements(
     return img
 
 
+COLOR_GRID = (255, 220, 0)  # Yellow-cyan — grid lines
+
+
+def draw_grid_lines(
+    img: np.ndarray,
+    row_centers: list[float],
+    col_centers: list[float],
+    alpha: float = 0.45,
+) -> np.ndarray:
+    """
+    Draw the inferred row/column grid as semi-transparent lines.
+
+    Rows are horizontal lines, columns are vertical lines.
+    Uses addWeighted for transparency so the sign is still visible underneath.
+    """
+    img_h, img_w = img.shape[:2]
+    overlay = img.copy()
+
+    for ry in row_centers:
+        y = int(round(ry))
+        if 0 <= y < img_h:
+            cv2.line(overlay, (0, y), (img_w - 1, y), COLOR_GRID, 1, cv2.LINE_AA)
+
+    for cx in col_centers:
+        x = int(round(cx))
+        if 0 <= x < img_w:
+            cv2.line(overlay, (x, 0), (x, img_h - 1), COLOR_GRID, 1, cv2.LINE_AA)
+
+    cv2.addWeighted(overlay, alpha, img, 1.0 - alpha, 0, img)
+    return img
+
+
 def render_annotated_image(
     pil_image: Image.Image,
     placard_predictions: list[dict],
     empty_space_predictions: list[dict],
     per_region: list[dict],
     min_confidence: float = 0.0,
+    grid: dict | None = None,
 ) -> Image.Image:
     """
     Compose all overlays onto the image and return a PIL Image.
 
-    Drawing order: empty regions → existing placards → proposed placements
-    so that proposals appear on top.
+    Drawing order: grid lines → empty regions → existing placards → proposed placements
+    so that proposals always appear on top.
     """
     img_rgb = np.array(pil_image.convert("RGB"))
     img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+
+    if grid:
+        img = draw_grid_lines(img, grid["row_centers"], grid["col_centers"])
 
     img = draw_empty_regions(img, empty_space_predictions, min_confidence)
     img = draw_placards(img, placard_predictions, min_confidence)

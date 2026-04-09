@@ -281,6 +281,126 @@ def place_rectangles_perspective_aware(
 
 
 # ---------------------------------------------------------------------------
+# Grid-based placement helpers
+# ---------------------------------------------------------------------------
+
+def _cluster_1d(values: list[float], gap_threshold: float) -> list[float]:
+    """
+    Group a sorted list of 1D values into clusters separated by gaps > gap_threshold.
+    Returns the mean of each cluster.
+    """
+    if not values:
+        return []
+    sv = sorted(values)
+    clusters: list[list[float]] = [[sv[0]]]
+    for v in sv[1:]:
+        if v - clusters[-1][-1] > gap_threshold:
+            clusters.append([v])
+        else:
+            clusters[-1].append(v)
+    return [float(np.mean(c)) for c in clusters]
+
+
+def infer_and_extend_grid(
+    placard_predictions: list[dict],
+    placard_w: int,
+    placard_h: int,
+    spacing: int,
+    img_w: int,
+    img_h: int,
+) -> tuple[list[float], list[float]]:
+    """
+    Infer a uniform row/column grid from existing placard center positions,
+    then extend it to fill the full image dimensions.
+
+    The grid pitch is the median gap between adjacent row/column centers.
+    If only one placard is detected, pitch falls back to placard size + spacing.
+
+    Returns (row_centers, col_centers) — y and x coordinates of grid lines.
+    """
+    centers = [(float(p["x"]), float(p["y"])) for p in placard_predictions]
+    if not centers:
+        # No reference placards — return a simple default grid
+        row_pitch = float(placard_h + spacing)
+        col_pitch = float(placard_w + spacing)
+        rows = [placard_h / 2 + i * row_pitch for i in range(int(img_h / row_pitch) + 1)]
+        cols = [placard_w / 2 + i * col_pitch for i in range(int(img_w / col_pitch) + 1)]
+        return rows, cols
+
+    xs = [c[0] for c in centers]
+    ys = [c[1] for c in centers]
+
+    # Cluster into distinct rows and columns
+    row_centers = _cluster_1d(ys, placard_h * 0.5)
+    col_centers = _cluster_1d(xs, placard_w * 0.5)
+
+    # Estimate pitch from adjacent cluster gaps (fall back to placard size + spacing)
+    def pitch_from(vals: list[float], fallback: float) -> float:
+        if len(vals) < 2:
+            return fallback
+        gaps = [vals[i + 1] - vals[i] for i in range(len(vals) - 1)]
+        return max(float(np.median(gaps)), fallback)
+
+    row_pitch = pitch_from(row_centers, float(placard_h + spacing))
+    col_pitch = pitch_from(col_centers, float(placard_w + spacing))
+
+    # Extend rows upward and downward
+    half_h = placard_h / 2.0
+    while row_centers[0] - row_pitch >= half_h:
+        row_centers.insert(0, row_centers[0] - row_pitch)
+    while row_centers[-1] + row_pitch <= img_h - half_h:
+        row_centers.append(row_centers[-1] + row_pitch)
+
+    # Extend columns left and right
+    half_w = placard_w / 2.0
+    while col_centers[0] - col_pitch >= half_w:
+        col_centers.insert(0, col_centers[0] - col_pitch)
+    while col_centers[-1] + col_pitch <= img_w - half_w:
+        col_centers.append(col_centers[-1] + col_pitch)
+
+    return row_centers, col_centers
+
+
+def place_on_grid(
+    row_centers: list[float],
+    col_centers: list[float],
+    placard_w: int,
+    placard_h: int,
+    mask: np.ndarray,
+    global_reserved: np.ndarray | None = None,
+) -> list[tuple[int, int, int, int]]:
+    """
+    Propose new placards at grid intersections that fall within the region mask
+    and are not already reserved.
+
+    Returns (x1, y1, x2, y2) tuples — the same format as place_rectangles_in_region.
+    """
+    img_h, img_w = mask.shape
+    if global_reserved is None:
+        global_reserved = np.zeros((img_h, img_w), dtype=np.uint8)
+
+    half_w = placard_w // 2
+    half_h = placard_h // 2
+    placements: list[tuple[int, int, int, int]] = []
+
+    for ry in row_centers:
+        for cx in col_centers:
+            x1 = int(round(cx)) - half_w
+            y1 = int(round(ry)) - half_h
+            x2 = x1 + placard_w
+            y2 = y1 + placard_h
+
+            if x1 < 0 or y1 < 0 or x2 > img_w or y2 > img_h:
+                continue
+            footprint_clear = np.all(global_reserved[y1:y2, x1:x2] == 0)
+            if footprint_clear and can_place_rectangle(mask, x1, y1, placard_w, placard_h):
+                placements.append((x1, y1, x2, y2))
+                global_reserved[y1:y2, x1:x2] = 1
+
+    return placements
+
+
+# ---------------------------------------------------------------------------
 # Top-level estimator
 # ---------------------------------------------------------------------------
 
@@ -299,6 +419,7 @@ def estimate_total_capacity(
     empty_space_scale: float = 1.0,
     perspective_mode: bool = False,
     image_bgr: np.ndarray | None = None,
+    grid_mode: bool = False,
 ) -> dict:
     """
     Estimate how many new placards can fit in the detected empty regions.
@@ -310,6 +431,9 @@ def estimate_total_capacity(
         warps fitted placard corners back as quads that match the camera angle.
     image_bgr: raw image as a BGR numpy array; required for blue-based perspective
         detection. If not provided, falls back to region-polygon-derived perspective.
+    grid_mode: if True, infers a uniform row/column grid from existing placard
+        positions and proposes new placards only at grid intersections that fall
+        within empty regions. More realistic than the greedy scan.
 
     Returns a dict with:
       - total_fit: int
@@ -320,6 +444,7 @@ def estimate_total_capacity(
       - used_polygon_mode: bool
       - used_perspective_mode: bool
       - sign_quad: the detected 4-corner sign quad (list[dict] | None)
+      - grid: {"row_centers": [...], "col_centers": [...]} if grid_mode else None
     """
     # Determine placard size
     placard_w = default_placard_w
@@ -360,6 +485,18 @@ def estimate_total_capacity(
             H_s, H_s_inv, dst_w_s, dst_h_s = compute_region_homography(sign_quad)
             sign_homography = (H_s, H_s_inv, dst_w_s, dst_h_s)
 
+    # ---------------------------------------------------------------
+    # Infer the grid from existing placard positions (once, globally).
+    # ---------------------------------------------------------------
+    grid_info: dict | None = None
+    grid_row_centers: list[float] = []
+    grid_col_centers: list[float] = []
+    if grid_mode:
+        grid_row_centers, grid_col_centers = infer_and_extend_grid(
+            placard_predictions, placard_w, placard_h, spacing, img_w, img_h
+        )
+        grid_info = {"row_centers": grid_row_centers, "col_centers": grid_col_centers}
+
     global_reserved = np.zeros((img_h, img_w), dtype=np.uint8)
 
     for idx, region_pred in enumerate(valid_regions):
@@ -395,16 +532,23 @@ def estimate_total_capacity(
                 if used_polygon:
                     any_polygon = True
             else:
-                # Fall back to standard fitting
+                # Fall back to grid or greedy fitting
                 region_mask, used_polygon = build_region_mask(
                     region_pred, img_h, img_w, margin=margin
                 )
                 if used_polygon:
                     any_polygon = True
-                placements = place_rectangles_in_region(
-                    region_mask, placard_w, placard_h, spacing=spacing,
-                    global_reserved=global_reserved,
-                )
+                if grid_mode:
+                    placements = place_on_grid(
+                        grid_row_centers, grid_col_centers,
+                        placard_w, placard_h, region_mask,
+                        global_reserved=global_reserved,
+                    )
+                else:
+                    placements = place_rectangles_in_region(
+                        region_mask, placard_w, placard_h, spacing=spacing,
+                        global_reserved=global_reserved,
+                    )
                 count = len(placements)
         else:
             region_mask, used_polygon = build_region_mask(
@@ -412,10 +556,17 @@ def estimate_total_capacity(
             )
             if used_polygon:
                 any_polygon = True
-            placements = place_rectangles_in_region(
-                region_mask, placard_w, placard_h, spacing=spacing,
-                global_reserved=global_reserved,
-            )
+            if grid_mode:
+                placements = place_on_grid(
+                    grid_row_centers, grid_col_centers,
+                    placard_w, placard_h, region_mask,
+                    global_reserved=global_reserved,
+                )
+            else:
+                placements = place_rectangles_in_region(
+                    region_mask, placard_w, placard_h, spacing=spacing,
+                    global_reserved=global_reserved,
+                )
             count = len(placements)
 
         total_fit += count
@@ -437,4 +588,5 @@ def estimate_total_capacity(
         "used_polygon_mode": any_polygon,
         "used_perspective_mode": any_perspective,
         "sign_quad": sign_quad,
+        "grid": grid_info,
     }
