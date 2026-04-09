@@ -130,8 +130,10 @@ def place_rectangles_in_region(
     while y + placard_h <= img_h:
         x = 0
         while x + placard_w <= img_w:
-            # Skip if already reserved by a previous placement
-            if reserved[y, x] == 0 and can_place_rectangle(mask, x, y, placard_w, placard_h):
+            # Check the ENTIRE proposed rectangle footprint is unreserved,
+            # not just the top-left corner — prevents overlapping placements.
+            footprint_clear = np.all(reserved[y:y + placard_h, x:x + placard_w] == 0)
+            if footprint_clear and can_place_rectangle(mask, x, y, placard_w, placard_h):
                 placements.append((x, y, x + placard_w, y + placard_h))
                 # Mark reserved area (placard + spacing on all sides)
                 rx1 = max(0, x - spacing)
