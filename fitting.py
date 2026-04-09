@@ -21,6 +21,7 @@ from geometry import (
     prediction_to_mask,
     compute_region_homography,
     simplify_polygon_to_quad,
+    detect_sign_quad_from_blue,
 )
 
 
@@ -209,40 +210,41 @@ def place_rectangles_perspective_aware(
     spacing: int = 4,
     margin: int = 0,
     global_reserved: np.ndarray | None = None,
+    sign_homography: tuple | None = None,
 ) -> list[list[list[float]]]:
     """
-    Perspective-aware placement for regions with exactly 4 polygon points.
+    Perspective-aware placement for empty regions.
 
     Algorithm:
-      1. Compute homography from the 4-corner trapezoid to a flat rectangle.
+      1. Compute (or use a provided) homography from the sign's perspective quad to flat.
       2. Warp the region mask into the flat rectangle space.
       3. Fit standard rectangular placards in the warped (flat) space.
       4. Warp each fitted rectangle's corners back through the inverse homography.
       5. Return the resulting quadrilaterals (as lists of 4 [x, y] pairs).
 
-    Falls back and returns [] if the region has no polygon points or the polygon
-    cannot be reduced to a valid quadrilateral.
+    sign_homography: optional pre-computed (H, H_inv, dst_w, dst_h) derived from
+        the actual blue sign pixels. When provided, this is used instead of
+        computing a local homography from the region polygon's corners. This gives
+        correct perspective scaling based on the real sign geometry.
 
-    Works with any polygon shape — multi-point rounded polygons are first
-    simplified to their 4 dominant corners via convex hull approximation.
-
-    Quad winding order: TL → TR → BR → BL (matches order_points convention).
+    Falls back and returns [] if no usable homography can be determined.
     """
     import cv2
 
-    raw_points = region_pred.get("points", [])
-    if len(raw_points) < 3:
-        return []
-
-    # Simplify to exactly 4 corners (handles both 4-point and multi-point polygons)
-    if len(raw_points) == 4:
-        points = raw_points
+    if sign_homography is not None:
+        H, H_inv, dst_w, dst_h = sign_homography
     else:
-        points = simplify_polygon_to_quad(raw_points)
-        if points is None:
+        # Fall back: compute local homography from the region polygon corners
+        raw_points = region_pred.get("points", [])
+        if len(raw_points) < 3:
             return []
-
-    H, H_inv, dst_w, dst_h = compute_region_homography(points)
+        if len(raw_points) == 4:
+            points = raw_points
+        else:
+            points = simplify_polygon_to_quad(raw_points)
+            if points is None:
+                return []
+        H, H_inv, dst_w, dst_h = compute_region_homography(points)
 
     # Build region mask in original image space and warp to flat rectangle
     orig_mask, _ = prediction_to_mask(region_pred, img_h, img_w)
@@ -296,24 +298,28 @@ def estimate_total_capacity(
     placard_scale: float = 1.0,
     empty_space_scale: float = 1.0,
     perspective_mode: bool = False,
+    image_bgr: np.ndarray | None = None,
 ) -> dict:
     """
     Estimate how many new placards can fit in the detected empty regions.
 
     placard_scale: multiplier applied to the final placard size (0.0–1.0).
     empty_space_scale: multiplier applied to each region's dimensions from its center.
-    perspective_mode: if True and a region has exactly 4 polygon points, uses
-        perspective-aware fitting — warps the trapezoid flat, fits rectangles,
-        then warps them back as quads that match the camera angle.
+    perspective_mode: if True, detects the sign's blue quad from pixel colors and
+        applies a single global perspective transform to all empty regions, then
+        warps fitted placard corners back as quads that match the camera angle.
+    image_bgr: raw image as a BGR numpy array; required for blue-based perspective
+        detection. If not provided, falls back to region-polygon-derived perspective.
 
     Returns a dict with:
       - total_fit: int
       - per_region: list of region dicts, each containing:
           "region_index", "count", "placements" (rects), "quad_placements" (quads),
-          "used_polygon", "used_perspective"
+          "detected_quad", "used_polygon", "used_perspective"
       - placard_w, placard_h: ints (dimensions used after scaling)
       - used_polygon_mode: bool
       - used_perspective_mode: bool
+      - sign_quad: the detected 4-corner sign quad (list[dict] | None)
     """
     # Determine placard size
     placard_w = default_placard_w
@@ -340,27 +346,36 @@ def estimate_total_capacity(
     any_polygon = False
     any_perspective = False
 
+    # ---------------------------------------------------------------
+    # Detect the sign's real perspective from blue pixel colors — once,
+    # globally.  This gives a single homography based on the actual sign
+    # geometry rather than any model-output polygon.
+    # ---------------------------------------------------------------
+    sign_quad: list[dict] | None = None
+    sign_homography: tuple | None = None
+    if perspective_mode:
+        if image_bgr is not None:
+            sign_quad = detect_sign_quad_from_blue(image_bgr)
+        if sign_quad is not None:
+            H_s, H_s_inv, dst_w_s, dst_h_s = compute_region_homography(sign_quad)
+            sign_homography = (H_s, H_s_inv, dst_w_s, dst_h_s)
+
     global_reserved = np.zeros((img_h, img_w), dtype=np.uint8)
 
     for idx, region_pred in enumerate(valid_regions):
         region_pred = scale_region_prediction(region_pred, empty_space_scale)
 
         points = region_pred.get("points", [])
-        use_perspective = perspective_mode and len(points) >= 3
+        # Trigger perspective if we have a blue-detected sign quad OR a polygon
+        use_perspective = perspective_mode and (
+            sign_homography is not None or len(points) >= 3
+        )
         used_perspective = False
         quad_placements: list[list[list[float]]] = []
         placements: list[tuple[int, int, int, int]] = []
+        detected_quad = sign_quad  # for visualisation — show the blue-detected quad
 
-        # Compute simplified 4-corner quad for perspective (used for viz + fitting)
-        detected_quad = None
         if use_perspective:
-            raw_pts = points
-            if len(raw_pts) == 4:
-                detected_quad = raw_pts
-            else:
-                detected_quad = simplify_polygon_to_quad(raw_pts)
-
-        if use_perspective and detected_quad is not None:
             quad_placements = place_rectangles_perspective_aware(
                 region_pred,
                 placard_w,
@@ -370,13 +385,15 @@ def estimate_total_capacity(
                 spacing=spacing,
                 margin=margin,
                 global_reserved=global_reserved,
+                sign_homography=sign_homography,  # None → falls back to polygon
             )
             if quad_placements:
                 used_perspective = True
                 any_perspective = True
                 count = len(quad_placements)
-                used_polygon = True
-                any_polygon = True
+                used_polygon = bool(points)
+                if used_polygon:
+                    any_polygon = True
             else:
                 # Fall back to standard fitting
                 region_mask, used_polygon = build_region_mask(
@@ -419,4 +436,5 @@ def estimate_total_capacity(
         "placard_h": placard_h,
         "used_polygon_mode": any_polygon,
         "used_perspective_mode": any_perspective,
+        "sign_quad": sign_quad,
     }

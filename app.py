@@ -14,6 +14,8 @@ import json
 import os
 from io import BytesIO
 
+import cv2
+import numpy as np
 import streamlit as st
 from PIL import Image
 
@@ -321,6 +323,9 @@ if "last_placard_preds" in st.session_state:
     if st.session_state.get("last_mock_mode"):
         st.info("Mock Mode is ON — using sample predictions (no API call made).")
 
+    # Convert PIL image to BGR for blue-based perspective detection
+    image_bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR) if perspective_mode else None
+
     # Re-run fitting with current slider values every time
     results = estimate_total_capacity(
         empty_space_predictions=empty_preds_filtered,
@@ -336,6 +341,7 @@ if "last_placard_preds" in st.session_state:
         placard_scale=placard_scale / 100.0,
         empty_space_scale=empty_space_scale / 100.0,
         perspective_mode=perspective_mode,
+        image_bgr=image_bgr,
     )
 
     # Re-render annotated image with current placements

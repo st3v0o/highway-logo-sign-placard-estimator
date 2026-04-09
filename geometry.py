@@ -91,6 +91,46 @@ def prediction_to_mask(pred: dict, img_h: int, img_w: int) -> tuple[np.ndarray, 
 # Perspective / homography helpers
 # ---------------------------------------------------------------------------
 
+def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
+    """
+    Detect the 4 corners of the blue highway sign panel directly from pixel colors.
+
+    Uses HSV color thresholding to find the dominant blue region in the image
+    (the sign panel), extracts the largest contour, and reduces it to a
+    quadrilateral.  This gives a perspective transform based on the actual
+    sign geometry rather than any model detection polygon.
+
+    Returns a list of 4 {"x", "y"} dicts in [TL, TR, BR, BL] order,
+    or None if the blue region cannot be found.
+    """
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+
+    # Highway blue signs: H≈100–135, moderate-high saturation, moderate value
+    lower_blue = np.array([90, 60, 40], dtype=np.uint8)
+    upper_blue = np.array([135, 255, 210], dtype=np.uint8)
+    mask = cv2.inRange(hsv, lower_blue, upper_blue)
+
+    # Morphological cleanup — close small holes, remove noise
+    k = np.ones((15, 15), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    # Use the largest blue contour (the sign panel)
+    largest = max(contours, key=cv2.contourArea)
+
+    # Must cover at least 5% of the image to be plausible
+    img_area = img_bgr.shape[0] * img_bgr.shape[1]
+    if cv2.contourArea(largest) < 0.05 * img_area:
+        return None
+
+    pts_list = [{"x": float(p[0][0]), "y": float(p[0][1])} for p in largest]
+    return simplify_polygon_to_quad(pts_list)
+
+
 def simplify_polygon_to_quad(points: list[dict]) -> list[dict] | None:
     """
     Reduce an arbitrary polygon to exactly 4 corner points.
