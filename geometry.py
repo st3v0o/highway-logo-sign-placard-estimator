@@ -302,10 +302,13 @@ def detect_sign_quad_from_blue(
             x_lo_top = max(0, bx)
             x_hi_top = min(mask.shape[1], bx + bw)
             scan_top_r = by
-            scan_15_r  = min(by + int(0.15 * bh), mask.shape[0] - 1)
+            # Scan up to 40 % of bbox height (was 15 %) so EXIT caps that
+            # occupy 20-30 % of the combined EXIT+sign height are still caught.
+            scan_hi_r  = min(by + int(0.40 * bh), mask.shape[0] - 1)
 
-            has_header_gap = False
-            if scan_15_r > scan_top_r and x_hi_top > x_lo_top:
+            has_header_gap   = False
+            header_gap_end_r = by   # first row of main sign body after the gap
+            if scan_hi_r > scan_top_r and x_hi_top > x_lo_top:
                 col_w = x_hi_top - x_lo_top
                 # Use the RAW mask (before morphology) so the physical air-gap
                 # between an EXIT sign and the main sign body is still visible.
@@ -315,13 +318,21 @@ def detect_sign_quad_from_blue(
                 raw_dens = [
                     float(mask_raw[r, x_lo_top:x_hi_top].sum())
                     / 255.0 / col_w
-                    for r in range(scan_top_r, scan_15_r)
+                    for r in range(scan_top_r, scan_hi_r)
                 ]
                 if raw_dens:
                     peak_d = max(raw_dens)
                     min_d  = min(raw_dens)
                     if peak_d > 0.20 and min_d < 0.10 * peak_d:
                         has_header_gap = True
+                        # Record where density recovers after the gap so the
+                        # band-pick for top_segs can start from the main sign.
+                        min_idx = int(np.argmin(raw_dens))
+                        header_gap_end_r = scan_top_r + min_idx + 1
+                        for _gi in range(min_idx + 1, len(raw_dens)):
+                            if raw_dens[_gi] > 0.15 * peak_d:
+                                header_gap_end_r = scan_top_r + _gi
+                                break
 
             # Proximity-based cluster of topmost h_segs.
             # Problem: on close-up shots (e.g. lodging sign filling the frame)
@@ -338,9 +349,11 @@ def detect_sign_quad_from_blue(
                 _top_cluster = []
 
             if has_header_gap:
-                # EXIT/GAS header above main sign → skip header, find main top
+                # EXIT/GAS header above main sign → start band from where the
+                # gap ends (main sign body begins) rather than a fixed 15 %.
+                band_lo = max(float(header_gap_end_r), by + 0.05 * bh)
                 top_segs = _band_pick(h_sorted,
-                                      by + 0.15 * bh, by + 0.60 * bh,
+                                      band_lo, by + 0.60 * bh,
                                       mid_y, take_top=True)
                 if top_segs is None:
                     top_segs = _top_cluster
