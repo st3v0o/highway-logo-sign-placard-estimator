@@ -94,10 +94,10 @@ def draw_proposed_placements(
                 dtype=np.int32,
             )
             cv2.polylines(img, [quad_pts], isClosed=True,
-                          color=COLOR_PERSP_QUAD, thickness=max(thickness, 2))
-            # Mark each corner with a small circle
+                          color=COLOR_PERSP_QUAD, thickness=max(thickness, 4))
+            # Mark each corner with a filled circle
             for pt in quad_pts:
-                cv2.circle(img, tuple(pt), 6, COLOR_PERSP_QUAD, -1)
+                cv2.circle(img, tuple(pt), 10, COLOR_PERSP_QUAD, -1)
 
         if region.get("used_perspective") and region.get("quad_placements"):
             # Draw perspective-corrected quadrilaterals

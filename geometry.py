@@ -105,9 +105,11 @@ def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
     """
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
 
-    # Highway blue signs: H≈100–135, moderate-high saturation, moderate value
-    lower_blue = np.array([90, 60, 40], dtype=np.uint8)
-    upper_blue = np.array([135, 255, 210], dtype=np.uint8)
+    # Highway blue signs: high saturation deep blue, moderate-low brightness.
+    # Key distinction from sky: sky is bright (V > 160) and less saturated (S < 120).
+    # Using tighter saturation and value bounds to avoid picking up sky blue.
+    lower_blue = np.array([90, 120, 40], dtype=np.uint8)
+    upper_blue = np.array([130, 255, 165], dtype=np.uint8)
     mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
     # Morphological cleanup — close small holes, remove noise
@@ -127,16 +129,18 @@ def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
     if cv2.contourArea(largest) < 0.05 * img_area:
         return None
 
-    # Use the minimum-area bounding rectangle of the convex hull.
-    # This is far more stable than approxPolyDP for rectangular signs: it directly
-    # captures the sign's overall orientation rather than picking 4 arbitrary points
-    # on an irregular contour, so the resulting homography doesn't introduce a
-    # spurious rotation into the grid lines.
-    hull = cv2.convexHull(largest)
-    rect = cv2.minAreaRect(hull)
-    box_pts = cv2.boxPoints(rect).astype(np.float32)   # 4 corners of min-area rect
-    ordered = order_points(box_pts)                     # → TL, TR, BR, BL
-    return [{"x": float(p[0]), "y": float(p[1])} for p in ordered]
+    # Use the axis-aligned bounding rectangle of the contour.
+    # Highway signs have horizontal/vertical edges regardless of camera angle, so
+    # an axis-aligned bbox gives corners that are parallel with the sign panel.
+    # minAreaRect was rotating the result whenever sky or background crept into the
+    # detected region; axis-aligned bbox is immune to that artifact.
+    x, y, w, h = cv2.boundingRect(largest)
+    return [
+        {"x": float(x),     "y": float(y)},      # TL
+        {"x": float(x + w), "y": float(y)},      # TR
+        {"x": float(x + w), "y": float(y + h)},  # BR
+        {"x": float(x),     "y": float(y + h)},  # BL
+    ]
 
 
 def simplify_polygon_to_quad(points: list[dict]) -> list[dict] | None:
