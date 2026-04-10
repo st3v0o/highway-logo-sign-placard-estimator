@@ -894,28 +894,55 @@ def detect_sign_quad(
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     best_sc, best_q = candidates[0]
+
+    method_names = ["border", "adaptive", "hough", "edge_contrast"]
+    all_qs = [q_border, q_adaptive, q_hough, q_edge]
+    import sys
+    for i, (sc, q) in enumerate(candidates):
+        name = "unknown"
+        for j, qq in enumerate(all_qs):
+            if qq is q:
+                name = method_names[j]
+                break
+        print(f"[quad_debug] method={name} score={sc:.4f} "
+              f"TL=({q[0]['x']:.0f},{q[0]['y']:.0f}) "
+              f"TR=({q[1]['x']:.0f},{q[1]['y']:.0f}) "
+              f"BR=({q[2]['x']:.0f},{q[2]['y']:.0f}) "
+              f"BL=({q[3]['x']:.0f},{q[3]['y']:.0f})", file=sys.stderr)
+    print(f"[quad_debug] WINNER={best_sc:.4f}", file=sys.stderr)
+
     if best_sc < 0.02:
         return None
 
-    # ── Right-boundary fix via blue-mask scan ─────────────────────────────
-    # EXIT-sign caps sit in the upper-right of the frame.  Every detection
-    # method can pull TR up and right into that cap.  The fix: scan the BLUE
-    # mask in the central y-band of the sign (40 %–80 % of the sign height).
-    # The EXIT cap never appears there, so the rightmost blue column in that
-    # band is the MAIN sign's true right edge.  We then project TL outward
-    # (along the same slope as the bottom edge BL→BR) to that x, giving a
-    # perspective-correct TR without any cap interference.
-    tl_d, tr_d, br_d, bl_d = best_q   # each {"x":…, "y":…}
+    # ── TR / TL post-processing fix ────────────────────────────────────────
+    # Problem: the EXIT-sign cap above the main sign can pull TL *and* TR
+    # upward regardless of which method wins.  Diagnostic output showed that
+    # for the Popeyes sign, the Hough method wins but places TL at y=170
+    # (inside the EXIT cap), while the other three methods correctly place TL
+    # at y≈290 (the main sign's actual top-left).
+    #
+    # Fix in two steps:
+    #   1. "Grounded TL" — take the TL with the LARGEST y across all
+    #      candidates.  EXIT-cap inflation always pushes TL UP (smaller y), so
+    #      the candidate with the biggest y is the most accurate.
+    #   2. Blue-mask scan for right boundary — scan the blue mask in the
+    #      central y-band (using grounded TL and the winner's BL) to find the
+    #      main sign's true right edge, then extrapolate TR.y from grounded TL
+    #      along the bottom-edge perspective slope.
+    _, _, br_d, bl_d = best_q   # BL and BR are reliable from the winner
+
+    # Step 1: grounded TL
+    grounded_tl = max((q[0] for _, q in candidates), key=lambda p: p["y"])
 
     sw = ww / w          # scale: original → working coords
     sb = w  / ww         # scale back: working → original
-    tl_w = np.array([tl_d["x"] * sw, tl_d["y"] * sw])
+    tl_w = np.array([grounded_tl["x"] * sw, grounded_tl["y"] * sw])
     bl_w = np.array([bl_d["x"] * sw, bl_d["y"] * sw])
     br_w = np.array([br_d["x"] * sw, br_d["y"] * sw])
 
     sign_h_w = max(bl_w[1] - tl_w[1], 1.0)
 
-    # Scan the central y-band (40 %–80 % of sign height in working space)
+    # Step 2: scan the central y-band (40 %–80 % of sign height) for right edge
     y_lo = int(np.clip(tl_w[1] + 0.40 * sign_h_w, 0, wh - 1))
     y_hi = int(np.clip(tl_w[1] + 0.80 * sign_h_w, 0, wh - 1))
 
@@ -926,14 +953,13 @@ def detect_sign_quad(
             right_cols.append(int(nz[-1]))
 
     if len(right_cols) >= 5:
-        # 80th-percentile is more robust than max against stray blue pixels
         right_x_w = float(np.percentile(right_cols, 80))
 
-        # Slope of the sign's perspective: use the bottom edge (BL→BR)
+        # Perspective slope from bottom edge (BL→BR)
         bot_dx = br_w[0] - bl_w[0]
         bot_dy = br_w[1] - bl_w[1]
 
-        # Extrapolate TL rightward along that slope to right_x_w
+        # Extrapolate grounded TL rightward along that slope to right_x_w
         dx_to_right = right_x_w - tl_w[0]
         if abs(bot_dx) > 1e-3:
             t = dx_to_right / bot_dx
@@ -943,13 +969,13 @@ def detect_sign_quad(
 
         tr_fixed = {"x": right_x_w * sb, "y": tr_y_w * sb}
     else:
-        # Fallback: parallelogram rule (rare — sign fills entire frame)
+        # Fallback: parallelogram rule
         tr_fixed = {
-            "x": tl_d["x"] + br_d["x"] - bl_d["x"],
-            "y": tl_d["y"] + br_d["y"] - bl_d["y"],
+            "x": grounded_tl["x"] + br_d["x"] - bl_d["x"],
+            "y": grounded_tl["y"] + br_d["y"] - bl_d["y"],
         }
 
-    return [tl_d, tr_fixed, br_d, bl_d]
+    return [grounded_tl, tr_fixed, br_d, bl_d]
 
 
 def detect_sign_quad_from_detections(
