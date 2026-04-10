@@ -255,11 +255,11 @@ if uploaded_file is not None:
     with st.expander("🔍 Sign Outline Debug (no API calls needed)", expanded=False):
         st.caption(
             "Preview the sign boundary on your image instantly — no API call needed. "
-            "This panel uses colour-only detection on the full image. "
-            "**After you run inference**, the full run uses a smarter method: it crops "
-            "tightly around the detected placards/empty regions first, then finds the "
-            "sign edges inside that crop (sky and trees are outside, so they can't interfere). "
-            "The sliders here let you verify the sign is detectable before committing to an API call."
+            "This panel uses colour-only detection on the full image (sky and trees can interfere). "
+            "**After you run inference**, the full run uses a much more reliable method: it builds "
+            "the sign boundary directly from the polygon corners returned by the model — those "
+            "points already lie on the sign surface in perspective, so no colour guessing is needed. "
+            "The sliders here are useful for a rough sanity check before your first API call."
         )
         col_s, col_v, col_k, col_o = st.columns(4)
         with col_s:

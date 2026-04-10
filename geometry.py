@@ -181,95 +181,58 @@ def detect_sign_quad_from_detections(
     img_bgr: np.ndarray,
     placard_predictions: list[dict],
     empty_predictions: list[dict],
-    roi_expand: float = 0.20,
+    expand: float = 0.12,
 ) -> list[dict] | None:
     """
-    Detect the sign quad using inference results to crop a tight ROI first.
+    Derive the sign quad directly from the polygon points returned by inference.
 
     Strategy
     --------
-    1. Compute the axis-aligned bounding box of ALL detected regions (placard +
-       empty-space).  These detections are inside the sign, so their union bbox
-       is a reliable proxy for the sign area.
-    2. Expand that bbox by `roi_expand` (fraction of its own size) on each side
-       to include the sign border and any undetected margins.
-    3. Crop the image to the expanded ROI.  Sky, trees, and adjacent signs are
-       outside this crop, so blue-pixel detection is trivially unambiguous.
-    4. Within the ROI, find the largest blue contour, fit minAreaRect, and
-       translate the 4 corners back to full-image coordinates.
+    The Roboflow model returns polygon corners for each detected region.  Those
+    points already lie ON the sign surface in perspective-correct image coords —
+    no colour thresholding or image processing needed.
 
-    Falls back to None if there are no predictions or no blue region in the ROI.
+    1. Collect every polygon point from every detection (placard + empty-space).
+       Fall back to the 4 bbox corners for any detection that has no polygon.
+    2. Compute the convex hull of all collected points.
+    3. Expand the hull outward from its centroid by `expand` (e.g. 12%) so the
+       boundary includes the sign border/frame that lies just outside the
+       detected regions.
+    4. Reduce to 4 corners via the TL/TR/BR/BL extreme-point heuristic.
+
+    This is perspective-correct by construction and requires no image analysis.
+    Returns None when no predictions are available.
     """
-    img_h, img_w = img_bgr.shape[:2]
     all_preds = placard_predictions + empty_predictions
     if not all_preds:
         return None
 
-    # --- Step 1: detection union bounding box ---
-    xs, ys = [], []
+    pts: list[list[float]] = []
     for pred in all_preds:
-        x1, y1, x2, y2 = bbox_to_xyxy(pred)
-        xs += [x1, x2]
-        ys += [y1, y2]
+        polygon = pred.get("points", [])
+        if polygon:
+            for p in polygon:
+                pts.append([float(p["x"]), float(p["y"])])
+        else:
+            x1, y1, x2, y2 = bbox_to_xyxy(pred)
+            pts += [[float(x1), float(y1)], [float(x2), float(y1)],
+                    [float(x2), float(y2)], [float(x1), float(y2)]]
 
-    det_x1, det_x2 = min(xs), max(xs)
-    det_y1, det_y2 = min(ys), max(ys)
-    det_w = max(det_x2 - det_x1, 1)
-    det_h = max(det_y2 - det_y1, 1)
-
-    mx = int(det_w * roi_expand)
-    my = int(det_h * roi_expand)
-    roi_x1 = max(0,     det_x1 - mx)
-    roi_y1 = max(0,     det_y1 - my)
-    roi_x2 = min(img_w, det_x2 + mx)
-    roi_y2 = min(img_h, det_y2 + my)
-
-    roi = img_bgr[roi_y1:roi_y2, roi_x1:roi_x2]
-    if roi.size == 0:
+    if len(pts) < 4:
         return None
 
-    # --- Step 2: blue detection within the ROI ---
-    # Inside the ROI, background is gone so thresholds can be permissive.
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(
-        hsv,
-        np.array([85, 60, 30],  dtype=np.uint8),   # wider: H 85-135, S≥60
-        np.array([135, 255, 255], dtype=np.uint8),
-    )
+    arr = np.array(pts, dtype=np.float32)
+    hull = cv2.convexHull(arr).reshape(-1, 2)
 
-    # Light morphological cleanup — close small internal gaps
-    kc = np.ones((15, 15), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kc)
+    # Expand outward from the centroid so the border/frame is included
+    centroid = hull.mean(axis=0)
+    expanded = centroid + (hull - centroid) * (1.0 + expand)
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
+    img_h, img_w = img_bgr.shape[:2]
+    expanded[:, 0] = np.clip(expanded[:, 0], 0, img_w - 1)
+    expanded[:, 1] = np.clip(expanded[:, 1], 0, img_h - 1)
 
-    # Largest contour by area — in the tight ROI this is unambiguously the sign
-    best_cnt = max(contours, key=cv2.contourArea)
-    if cv2.contourArea(best_cnt) < 0.05 * roi.shape[0] * roi.shape[1]:
-        return None  # nothing large enough
-
-    # --- Step 3: fit quad, translate to full-image coords ---
-    hull_pts = cv2.convexHull(best_cnt).reshape(-1, 2).astype(np.float32)
-
-    if len(hull_pts) > 4:
-        centroid = hull_pts.mean(axis=0)
-        dists    = np.linalg.norm(hull_pts - centroid, axis=1)
-        med_dist = float(np.median(dists))
-        cleaned  = hull_pts[dists <= med_dist * 1.4]
-        if len(cleaned) >= 4:
-            hull_pts = cleaned
-
-    rect = cv2.minAreaRect(hull_pts)
-    box  = cv2.boxPoints(rect)
-    box  = np.float32(box)
-
-    # Shift from ROI-local to full-image coordinates
-    box[:, 0] += roi_x1
-    box[:, 1] += roi_y1
-
-    return _four_extreme_hull_points(box)
+    return _four_extreme_hull_points(expanded)
 
 
 def simplify_polygon_to_quad(points: list[dict]) -> list[dict] | None:
