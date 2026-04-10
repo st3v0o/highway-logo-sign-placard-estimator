@@ -26,7 +26,7 @@ from roboflow_client import (
     MOCK_EMPTY_SPACE_RESPONSE,
 )
 from fitting import estimate_total_capacity
-from geometry import detect_sign_quad_from_detections, detect_sign_quad_from_blue
+from geometry import detect_sign_quad_from_blue
 from visualize import render_annotated_image, draw_sign_quad
 
 
@@ -54,8 +54,6 @@ DEFAULTS = {
     "min_confidence": 0.4,
     "placard_scale": 100,
     "empty_space_scale": 100,
-    "perspective_mode": False,
-    "grid_mode": False,
 }
 
 
@@ -160,28 +158,6 @@ with st.sidebar:
         key="empty_space_scale",
         help="Shrinks each detected empty region from its center. Lower values reduce the usable area, fitting fewer placards per region. Updates live after inference.",
     )
-    perspective_mode = st.checkbox(
-        "Perspective-aware fitting",
-        key="perspective_mode",
-        help=(
-            "When enabled and a detected region has exactly 4 polygon corners, "
-            "the region is un-warped to a flat rectangle, placards are fitted there, "
-            "and their outlines are warped back as trapezoids matching the camera angle. "
-            "Requires your detection model to return polygon (not just bounding-box) outputs."
-        ),
-    )
-    grid_mode = st.checkbox(
-        "Grid-aligned placement",
-        key="grid_mode",
-        help=(
-            "Infers a uniform row/column grid from the positions of existing detected "
-            "placards, extends that grid across the whole sign, and proposes new placards "
-            "only at grid intersections inside empty regions. "
-            "The inferred grid lines are drawn in yellow. "
-            "Produces realistic placements that stay in line with the existing signs."
-        ),
-    )
-
     st.divider()
     st.subheader("Layout Parameters")
     outer_margin = st.number_input(
@@ -226,8 +202,6 @@ with st.sidebar:
             "min_confidence": float(st.session_state.min_confidence),
             "placard_scale": int(st.session_state.placard_scale),
             "empty_space_scale": int(st.session_state.empty_space_scale),
-            "perspective_mode": bool(st.session_state.perspective_mode),
-            "grid_mode": bool(st.session_state.grid_mode),
         })
         st.success("Settings saved!")
 
@@ -431,13 +405,9 @@ if "results_list" in st.session_state and st.session_state["results_list"]:
         if item.get("mock_mode"):
             st.info("Mock Mode is ON — using sample predictions (no API call made).")
 
-        # Need image_bgr for blue-pixel sign boundary when either
-        # perspective mode or grid mode is active.
-        image_bgr = (
-            cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-            if (perspective_mode or grid_mode)
-            else None
-        )
+        # Always compute the blue-pixel sign boundary and use perspective +
+        # grid mode — no optional checkboxes, this is always active.
+        image_bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
 
         results = estimate_total_capacity(
             empty_space_predictions=empty_preds_filtered,
@@ -452,9 +422,9 @@ if "results_list" in st.session_state and st.session_state["results_list"]:
             estimate_size_from_detections=estimate_from_detections,
             placard_scale=placard_scale / 100.0,
             empty_space_scale=empty_space_scale / 100.0,
-            perspective_mode=perspective_mode,
+            perspective_mode=True,
             image_bgr=image_bgr,
-            grid_mode=grid_mode,
+            grid_mode=True,
         )
 
         annotated = render_annotated_image(
@@ -465,7 +435,7 @@ if "results_list" in st.session_state and st.session_state["results_list"]:
             min_confidence=0.0,
             grid=results.get("grid"),
             sign_quad=results.get("sign_quad"),
-            draw_sign_grid=grid_mode,
+            draw_sign_grid=True,
         )
 
         col_img, col_stats = st.columns([3, 1])
@@ -490,15 +460,15 @@ if "results_list" in st.session_state and st.session_state["results_list"]:
             st.metric("Placard Width Used (px)", results["placard_w"])
             st.metric("Placard Height Used (px)", results["placard_h"])
 
-        # --- Sign quad debug (no API calls — uses cached detections) ---
+        # --- Sign quad debug — reuses sign_quad already computed above ---
         with st.expander("🔍 Sign Outline Preview"):
             st.caption(
-                "Shows the sign boundary box computed from the detected placard and empty-region "
-                "positions. No extra API call is made — this reuses the predictions already fetched above."
+                "Shows the blue-pixel sign boundary detected from the image. "
+                "No extra API call is made — this reuses the quad computed during inference."
             )
-            _bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-            _quad = detect_sign_quad_from_detections(_bgr, placard_preds_filtered, empty_preds_filtered)
+            _quad = results.get("sign_quad")
             if _quad:
+                _bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
                 _preview = draw_sign_quad(_bgr.copy(), _quad)
                 _preview = cv2.cvtColor(_preview, cv2.COLOR_BGR2RGB)
                 st.image(_preview, use_container_width=True)
@@ -508,7 +478,7 @@ if "results_list" in st.session_state and st.session_state["results_list"]:
                 )
             else:
                 st.image(np.array(pil_image), use_container_width=True)
-                st.warning("Could not compute sign boundary — no detections available.")
+                st.warning("Could not detect a blue sign boundary in this image.")
 
         # --- Debug metrics ---
         with st.expander("📊 Debug Details"):
