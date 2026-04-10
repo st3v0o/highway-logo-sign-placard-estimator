@@ -26,7 +26,8 @@ from roboflow_client import (
     MOCK_EMPTY_SPACE_RESPONSE,
 )
 from fitting import estimate_total_capacity
-from visualize import render_annotated_image
+from geometry import detect_sign_quad_from_blue
+from visualize import render_annotated_image, draw_sign_quad
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +246,54 @@ uploaded_file = st.file_uploader(
     type=["jpg", "jpeg", "png", "bmp", "webp"],
     help="Drag and drop or click to browse.",
 )
+
+# ---------------------------------------------------------------------------
+# Sign Quad Debug Panel — no API calls needed, works instantly on any upload
+# ---------------------------------------------------------------------------
+
+if uploaded_file is not None:
+    with st.expander("🔍 Sign Outline Debug (no API calls needed)", expanded=False):
+        st.caption(
+            "Adjust the sliders below to tune the sign boundary detection. "
+            "This runs instantly on your uploaded image — no Roboflow call required. "
+            "Once the yellow box looks right, those values will guide the full inference run."
+        )
+        col_s, col_v, col_k, col_o = st.columns(4)
+        with col_s:
+            dbg_s_min = st.slider("S min (saturation floor)", 60, 200, 120, 5,
+                                  help="Raise to exclude sky (sky S ≈ 60–100)")
+        with col_v:
+            dbg_v_max = st.slider("V max (brightness ceiling)", 100, 255, 200, 5,
+                                  help="Lower to exclude bright sky (sky V > 200)")
+        with col_k:
+            dbg_open_k = st.slider("Open kernel", 4, 40, 20, 2,
+                                   help="Larger breaks wider sky-to-sign pixel bridges")
+        with col_o:
+            dbg_outlier = st.slider("Outlier cutoff ×", 1.0, 2.5, 1.3, 0.05,
+                                    help="Hull points beyond this × median distance are pruned")
+
+        _dbg_pil = Image.open(uploaded_file).convert("RGB")
+        _dbg_bgr = cv2.cvtColor(np.array(_dbg_pil), cv2.COLOR_RGB2BGR)
+        _dbg_quad = detect_sign_quad_from_blue(
+            _dbg_bgr,
+            s_min=dbg_s_min,
+            v_max=dbg_v_max,
+            open_k=dbg_open_k,
+            outlier_mult=dbg_outlier,
+        )
+        _dbg_img = cv2.cvtColor(_dbg_bgr.copy(), cv2.COLOR_BGR2RGB)
+        if _dbg_quad:
+            _dbg_img_drawn = draw_sign_quad(cv2.cvtColor(_dbg_img, cv2.COLOR_RGB2BGR), _dbg_quad)
+            _dbg_img_drawn = cv2.cvtColor(_dbg_img_drawn, cv2.COLOR_BGR2RGB)
+            st.image(_dbg_img_drawn, caption="Detected sign outline", use_container_width=True)
+            st.success(
+                f"Quad detected — corners: "
+                + ", ".join(f"({p['x']:.0f}, {p['y']:.0f})" for p in _dbg_quad)
+            )
+        else:
+            st.image(_dbg_img, caption="Original image", use_container_width=True)
+            st.warning("No blue sign region found with current settings. Try lowering S min or raising V max.")
+
 
 run_button = st.button("Run Inference", type="primary", disabled=uploaded_file is None)
 

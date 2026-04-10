@@ -91,14 +91,23 @@ def prediction_to_mask(pred: dict, img_h: int, img_w: int) -> tuple[np.ndarray, 
 # Perspective / homography helpers
 # ---------------------------------------------------------------------------
 
-def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
+def detect_sign_quad_from_blue(
+    img_bgr: np.ndarray,
+    s_min: int = 120,
+    v_max: int = 200,
+    open_k: int = 20,
+    outlier_mult: float = 1.3,
+) -> list[dict] | None:
     """
     Detect the 4 corners of the blue highway sign panel directly from pixel colors.
 
-    Uses HSV color thresholding to find the dominant blue region in the image
-    (the sign panel), extracts the largest contour, and reduces it to a
-    quadrilateral.  This gives a perspective transform based on the actual
-    sign geometry rather than any model detection polygon.
+    Parameters
+    ----------
+    img_bgr      : BGR image array
+    s_min        : HSV saturation floor (0–255); raise to exclude sky
+    v_max        : HSV value ceiling (0–255); lower to exclude bright sky
+    open_k       : morphological opening kernel size; larger severs wider sky bridges
+    outlier_mult : hull points farther than (outlier_mult × median_dist) are pruned
 
     Returns a list of 4 {"x", "y"} dicts in [TL, TR, BR, BL] order,
     or None if the blue region cannot be found.
@@ -107,18 +116,14 @@ def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
 
     # Highway blue signs: highly saturated, moderately bright blue.
     # Clear sky is low-saturation and very bright (S ≈ 60-90, V > 200).
-    # S ≥ 120 and V ≤ 200 reliably separates sign blue from sky blue
-    # across different lighting conditions.
-    lower_blue = np.array([90, 120, 40], dtype=np.uint8)
-    upper_blue = np.array([130, 255, 200], dtype=np.uint8)
+    lower_blue = np.array([90, s_min, 40],       dtype=np.uint8)
+    upper_blue = np.array([130, 255,  v_max],    dtype=np.uint8)
     mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
     # Open first (remove thin sky bridges connecting sign to sky blobs),
     # then close (fill internal holes / gaps in the sign body).
-    # A 20×20 kernel severs pixel bridges up to ~10px wide, which covers
-    # typical sky-through-tree connections at the sign edges.
-    k_open  = np.ones((20, 20), np.uint8)
-    k_close = np.ones((25, 25), np.uint8)
+    k_open  = np.ones((open_k, open_k), np.uint8)
+    k_close = np.ones((25, 25),         np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
 
@@ -157,9 +162,9 @@ def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
         centroid  = hull_pts.mean(axis=0)
         dists     = np.linalg.norm(hull_pts - centroid, axis=1)
         med_dist  = float(np.median(dists))
-        # Allow points up to 1.5× the median distance — sign corners are
-        # roughly equidistant from the centroid; sky outliers are much farther.
-        threshold = med_dist * 1.5
+        # Allow points up to outlier_mult × the median distance — sign corners
+        # are roughly equidistant from the centroid; sky outliers are farther.
+        threshold = med_dist * outlier_mult
         cleaned   = hull_pts[dists <= threshold]
         if len(cleaned) >= 4:
             hull_pts = cleaned
