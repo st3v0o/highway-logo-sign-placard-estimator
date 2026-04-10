@@ -172,28 +172,137 @@ def detect_sign_quad_from_blue(
     if best_cnt is None:
         return None
 
-    # Build the convex hull of the winning contour, then prune outlier hull
-    # points before fitting minAreaRect.  Stray sky pixels that survived
-    # morphological cleanup sit far from the sign's centre and will be cut.
-    hull_pts = cv2.convexHull(best_cnt).reshape(-1, 2).astype(np.float32)
+    # ── Per-edge Hough line detection ────────────────────────────────────────
+    # Detect each edge independently so that a header panel (EXIT sign) attached
+    # above the main sign body cannot pull the top edge upward.
+    #
+    # Strategy for the TOP edge:
+    #   Only consider horizontal segments whose y-midpoint falls in the range
+    #   [bbox_y + 15 % × bbox_h,  bbox_y + 60 % × bbox_h].
+    #   This band skips the EXIT-panel top (< 15 %) while staying above the
+    #   sign mid-line (> 60 %), reliably finding the main panel's top edge.
+    #
+    # All other edges use the standard extreme-quartile approach.
 
-    if len(hull_pts) > 4:
-        centroid  = hull_pts.mean(axis=0)
-        dists     = np.linalg.norm(hull_pts - centroid, axis=1)
-        med_dist  = float(np.median(dists))
-        # Allow points up to outlier_mult × the median distance — sign corners
-        # are roughly equidistant from the centroid; sky outliers are farther.
-        threshold = med_dist * outlier_mult
-        cleaned   = hull_pts[dists <= threshold]
-        if len(cleaned) >= 4:
-            hull_pts = cleaned
+    bx, by, bw, bh = cv2.boundingRect(best_cnt)
 
-    # minAreaRect is anchored to the dense contour mass; even a few outlier
-    # edge pixels can't pull a corner far off the sign.
-    rect = cv2.minAreaRect(hull_pts)
-    box  = cv2.boxPoints(rect)           # 4 corners, arbitrary order
-    box  = np.float32(box)
-    quad = _four_extreme_hull_points(box)
+    # Filled contour mask → Canny edges → Hough segments
+    cnt_mask = np.zeros(img_work.shape[:2], dtype=np.uint8)
+    cv2.drawContours(cnt_mask, [best_cnt], 0, 255, -1)
+    edges = cv2.Canny(cnt_mask, 50, 150)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180,
+                             threshold=30, minLineLength=30, maxLineGap=15)
+
+    def _minAreaRect_fallback():
+        hull_pts = cv2.convexHull(best_cnt).reshape(-1, 2).astype(np.float32)
+        if len(hull_pts) > 4:
+            centroid = hull_pts.mean(axis=0)
+            dists    = np.linalg.norm(hull_pts - centroid, axis=1)
+            threshold_d = float(np.median(dists)) * outlier_mult
+            cleaned  = hull_pts[dists <= threshold_d]
+            if len(cleaned) >= 4:
+                hull_pts = cleaned
+        rect = cv2.minAreaRect(hull_pts)
+        return _four_extreme_hull_points(np.float32(cv2.boxPoints(rect)))
+
+    if lines is None:
+        quad = _minAreaRect_fallback()
+    else:
+        segs = lines.reshape(-1, 4)
+
+        # Classify each segment as horizontal or vertical by its angle
+        h_segs, v_segs = [], []
+        for x1, y1, x2, y2 in segs:
+            dx, dy = float(x2 - x1), float(y2 - y1)
+            angle = abs(np.degrees(np.arctan2(dy, dx)))
+            if angle < 30 or angle > 150:
+                h_segs.append((x1, y1, x2, y2))
+            elif 60 < angle < 120:
+                v_segs.append((x1, y1, x2, y2))
+
+        if len(h_segs) < 2 or len(v_segs) < 2:
+            quad = _minAreaRect_fallback()
+        else:
+            # Sort by mid-y (horizontal) and mid-x (vertical)
+            h_sorted = sorted(h_segs, key=lambda s: (s[1] + s[3]) / 2)
+            v_sorted = sorted(v_segs, key=lambda s: (s[0] + s[2]) / 2)
+
+            k_h = max(1, len(h_segs) // 4)
+            k_v = max(1, len(v_segs) // 4)
+
+            # BOTTOM edge: lowest horizontal segments (standard)
+            bot_segs = h_sorted[-k_h:]
+
+            # TOP edge: horizontal segments in the 15–60 % band of the
+            # contour bounding box.  Segments above 15 % (EXIT panel top)
+            # are excluded; segments below 60 % belong to the sign body.
+            top_band_lo = by + 0.15 * bh
+            top_band_hi = by + 0.60 * bh
+            h_top_candidates = [
+                s for s in h_sorted
+                if top_band_lo <= (s[1] + s[3]) / 2 <= top_band_hi
+            ]
+            if h_top_candidates:
+                # Take the topmost segments within the band
+                k_top = max(1, len(h_top_candidates) // 4)
+                top_segs = sorted(h_top_candidates,
+                                  key=lambda s: (s[1] + s[3]) / 2)[:k_top]
+            else:
+                # Fallback: topmost 25 % overall
+                top_segs = h_sorted[:k_h]
+
+            # LEFT / RIGHT edges: standard extreme-quartile vertical segments
+            left_segs  = v_sorted[:k_v]
+            right_segs = v_sorted[-k_v:]
+
+            # Fit one line per edge and intersect opposite pairs
+            def fit_abc_local(s_list):
+                pts = np.array([[(s[0]+s[2])/2, (s[1]+s[3])/2] for s in s_list],
+                               dtype=np.float32)
+                if len(pts) == 1:
+                    x1, y1, x2, y2 = s_list[0]
+                    a, b = float(y2-y1), float(x1-x2)
+                    c = float(x2*y1 - x1*y2)
+                else:
+                    fl = cv2.fitLine(pts.reshape(-1, 1, 2),
+                                     cv2.DIST_L2, 0, 0.01, 0.01).flatten()
+                    vx, vy, cx, cy = float(fl[0]), float(fl[1]), float(fl[2]), float(fl[3])
+                    a, b = -vy, vx
+                    c = vy * cx - vx * cy
+                n = max(float(np.sqrt(a*a + b*b)), 1e-9)
+                return a/n, b/n, c/n
+
+            def intersect_local(l1, l2):
+                a1, b1, c1 = l1;  a2, b2, c2 = l2
+                det = a1*b2 - a2*b1
+                if abs(det) < 1e-6:
+                    return None
+                return ((-c1*b2 + c2*b1) / det,
+                        (-a1*c2 + a2*c1) / det)
+
+            top   = fit_abc_local(top_segs)
+            bot   = fit_abc_local(bot_segs)
+            left  = fit_abc_local(left_segs)
+            right = fit_abc_local(right_segs)
+
+            tl = intersect_local(top, left)
+            tr = intersect_local(top, right)
+            br = intersect_local(bot, right)
+            bl = intersect_local(bot, left)
+
+            if any(pt is None for pt in [tl, tr, br, bl]):
+                quad = _minAreaRect_fallback()
+            else:
+                pts_arr = np.array([
+                    [tl[0], tl[1]], [tr[0], tr[1]],
+                    [br[0], br[1]], [bl[0], bl[1]],
+                ], dtype=np.float32)
+                # Sanity: reject if any corner is implausibly far off
+                if any(abs(p[0]) > 1e4 or abs(p[1]) > 1e4 for p in pts_arr):
+                    quad = _minAreaRect_fallback()
+                else:
+                    quad = _four_extreme_hull_points(pts_arr)
+
     if quad is None:
         return None
 
