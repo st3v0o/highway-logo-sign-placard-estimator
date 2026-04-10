@@ -4,10 +4,10 @@ app.py
 Streamlit GUI for the Highway Logo Sign Placard Capacity Estimator.
 
 Workflow:
-  1. Upload an image of a highway logo sign
+  1. Upload one or more images of highway logo signs
   2. Configure Roboflow model credentials in the sidebar (or enable Mock Mode)
-  3. Click "Run Inference" — calls both models once and stores predictions
-  4. Adjust the Placard Scale slider to live-update placements without re-running inference
+  3. Click "Run Inference" — calls both models for each image and stores predictions
+  4. Adjust sliders to live-update placements without re-running inference
 """
 
 import json
@@ -26,7 +26,7 @@ from roboflow_client import (
     MOCK_EMPTY_SPACE_RESPONSE,
 )
 from fitting import estimate_total_capacity
-from geometry import detect_sign_quad_from_blue
+from geometry import detect_sign_quad_from_detections
 from visualize import render_annotated_image, draw_sign_quad
 
 
@@ -60,7 +60,6 @@ DEFAULTS = {
 
 
 def load_settings() -> dict:
-    """Load saved settings from disk, falling back to defaults for any missing keys."""
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r") as f:
@@ -72,12 +71,10 @@ def load_settings() -> dict:
 
 
 def save_settings(values: dict) -> None:
-    """Write current settings to disk."""
     with open(SETTINGS_FILE, "w") as f:
         json.dump(values, f, indent=2)
 
 
-# Load saved settings once per session
 if "settings_loaded" not in st.session_state:
     saved = load_settings()
     for k, v in saved.items():
@@ -95,10 +92,9 @@ st.set_page_config(
     layout="wide",
 )
 
-
 st.title("Highway Logo Sign — Placard Capacity Estimator")
 st.caption(
-    "Upload a sign image, configure Roboflow models, and estimate how many new "
+    "Upload one or more sign images, configure Roboflow models, and estimate how many new "
     "business placards can fit in the open blue space."
 )
 
@@ -237,96 +233,57 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------------------
-# Image uploader + Run button
+# Image uploader — accepts multiple files
 # ---------------------------------------------------------------------------
 
 st.divider()
-uploaded_file = st.file_uploader(
-    "Upload a sign image",
+uploaded_files = st.file_uploader(
+    "Upload sign image(s)",
     type=["jpg", "jpeg", "png", "bmp", "webp"],
-    help="Drag and drop or click to browse.",
+    accept_multiple_files=True,
+    help="Drag and drop or click to browse. You can select multiple images at once.",
+)
+
+run_button = st.button(
+    "Run Inference",
+    type="primary",
+    disabled=not uploaded_files,
 )
 
 # ---------------------------------------------------------------------------
-# Sign Quad Debug Panel — no API calls needed, works instantly on any upload
-# ---------------------------------------------------------------------------
-
-if uploaded_file is not None:
-    with st.expander("🔍 Sign Outline Debug (no API calls needed)", expanded=False):
-        st.caption(
-            "Preview the sign boundary on your image instantly — no API call needed. "
-            "This panel uses colour-only detection on the full image (sky and trees can interfere). "
-            "**After you run inference**, the full run uses a much more reliable method: it builds "
-            "the sign boundary directly from the polygon corners returned by the model — those "
-            "points already lie on the sign surface in perspective, so no colour guessing is needed. "
-            "The sliders here are useful for a rough sanity check before your first API call."
-        )
-        col_s, col_v, col_k, col_o = st.columns(4)
-        with col_s:
-            dbg_s_min = st.slider("S min (saturation floor)", 60, 200, 120, 5,
-                                  help="Raise to exclude sky (sky S ≈ 60–100)")
-        with col_v:
-            dbg_v_max = st.slider("V max (brightness ceiling)", 100, 255, 200, 5,
-                                  help="Lower to exclude bright sky (sky V > 200)")
-        with col_k:
-            dbg_open_k = st.slider("Open kernel", 4, 40, 20, 2,
-                                   help="Larger breaks wider sky-to-sign pixel bridges")
-        with col_o:
-            dbg_outlier = st.slider("Outlier cutoff ×", 1.0, 2.5, 1.3, 0.05,
-                                    help="Hull points beyond this × median distance are pruned")
-
-        _dbg_pil = Image.open(uploaded_file).convert("RGB")
-        _dbg_bgr = cv2.cvtColor(np.array(_dbg_pil), cv2.COLOR_RGB2BGR)
-        _dbg_quad = detect_sign_quad_from_blue(
-            _dbg_bgr,
-            s_min=dbg_s_min,
-            v_max=dbg_v_max,
-            open_k=dbg_open_k,
-            outlier_mult=dbg_outlier,
-        )
-        _dbg_img = cv2.cvtColor(_dbg_bgr.copy(), cv2.COLOR_BGR2RGB)
-        if _dbg_quad:
-            _dbg_img_drawn = draw_sign_quad(cv2.cvtColor(_dbg_img, cv2.COLOR_RGB2BGR), _dbg_quad)
-            _dbg_img_drawn = cv2.cvtColor(_dbg_img_drawn, cv2.COLOR_BGR2RGB)
-            st.image(_dbg_img_drawn, caption="Detected sign outline", use_container_width=True)
-            st.success(
-                f"Quad detected — corners: "
-                + ", ".join(f"({p['x']:.0f}, {p['y']:.0f})" for p in _dbg_quad)
-            )
-        else:
-            st.image(_dbg_img, caption="Original image", use_container_width=True)
-            st.warning("No blue sign region found with current settings. Try lowering S min or raising V max.")
-
-
-run_button = st.button("Run Inference", type="primary", disabled=uploaded_file is None)
-
-# ---------------------------------------------------------------------------
 # Inference — runs only when the button is clicked.
-# Stores raw predictions + image bytes in session_state so that slider
-# changes can re-run fitting without hitting the API again.
+# Stores results per image in session_state["results_list"].
 # ---------------------------------------------------------------------------
 
-if run_button and uploaded_file is not None:
-    pil_image = Image.open(uploaded_file).convert("RGB")
-    img_w, img_h = pil_image.size
+if run_button and uploaded_files:
+    if not mock_mode:
+        missing = []
+        if not api_key:
+            missing.append("API Key")
+        if not placard_project:
+            missing.append("Placard Project ID")
+        if not empty_project:
+            missing.append("Empty-Space Project ID")
+        if missing:
+            st.error(f"Please fill in the following fields: {', '.join(missing)}")
+            st.stop()
 
-    with st.spinner("Running inference..."):
+    results_list = []
+    progress = st.progress(0, text="Running inference…")
+
+    for idx, uf in enumerate(uploaded_files):
+        progress.progress(
+            (idx) / len(uploaded_files),
+            text=f"Processing {uf.name} ({idx + 1}/{len(uploaded_files)})…",
+        )
+
+        pil_image = Image.open(uf).convert("RGB")
+        img_w, img_h = pil_image.size
+
         if mock_mode:
             placard_resp = MOCK_PLACARD_RESPONSE
             empty_resp = MOCK_EMPTY_SPACE_RESPONSE
         else:
-            missing = []
-            if not api_key:
-                missing.append("API Key")
-            if not placard_project:
-                missing.append("Placard Project ID")
-            if not empty_project:
-                missing.append("Empty-Space Project ID")
-
-            if missing:
-                st.error(f"Please fill in the following fields: {', '.join(missing)}")
-                st.stop()
-
             try:
                 placard_resp = call_placard_model(
                     pil_image=pil_image,
@@ -337,8 +294,8 @@ if run_button and uploaded_file is not None:
                     confidence=min_confidence,
                 )
             except Exception as exc:
-                st.error(f"Placard model call failed: {exc}")
-                st.stop()
+                st.error(f"{uf.name}: Placard model failed — {exc}")
+                continue
 
             try:
                 empty_resp = call_empty_space_model(
@@ -350,147 +307,155 @@ if run_button and uploaded_file is not None:
                     confidence=min_confidence,
                 )
             except Exception as exc:
-                st.error(f"Empty-space model call failed: {exc}")
-                st.stop()
+                st.error(f"{uf.name}: Empty-space model failed — {exc}")
+                continue
 
-    # Filter by confidence and store everything in session_state
-    placard_preds = placard_resp.get("predictions", [])
-    empty_preds = empty_resp.get("predictions", [])
-    conf = min_confidence
-    st.session_state["last_placard_preds"] = [p for p in placard_preds if p.get("confidence", 0) >= conf]
-    st.session_state["last_empty_preds"] = [p for p in empty_preds if p.get("confidence", 0) >= conf]
-    st.session_state["last_placard_resp"] = placard_resp
-    st.session_state["last_empty_resp"] = empty_resp
-    st.session_state["last_mock_mode"] = mock_mode
+        conf = min_confidence
+        placard_preds = [p for p in placard_resp.get("predictions", []) if p.get("confidence", 0) >= conf]
+        empty_preds = [p for p in empty_resp.get("predictions", []) if p.get("confidence", 0) >= conf]
 
-    # Store image as bytes so it survives reruns
-    buf = BytesIO()
-    pil_image.save(buf, format="PNG")
-    st.session_state["last_img_bytes"] = buf.getvalue()
-    st.session_state["last_img_w"] = img_w
-    st.session_state["last_img_h"] = img_h
+        buf = BytesIO()
+        pil_image.save(buf, format="PNG")
+
+        results_list.append({
+            "filename": uf.name,
+            "img_bytes": buf.getvalue(),
+            "img_w": img_w,
+            "img_h": img_h,
+            "placard_preds": placard_preds,
+            "empty_preds": empty_preds,
+            "placard_resp": placard_resp,
+            "empty_resp": empty_resp,
+            "mock_mode": mock_mode,
+        })
+
+    progress.progress(1.0, text="Done!")
+    st.session_state["results_list"] = results_list
 
 
 # ---------------------------------------------------------------------------
-# Results — runs on every rerun (including slider changes) if predictions exist.
-# This means scale/margin/spacing sliders live-update without re-calling the API.
+# Results — re-rendered on every rerun (slider changes update live).
 # ---------------------------------------------------------------------------
 
-if "last_placard_preds" in st.session_state:
-    placard_preds_filtered = st.session_state["last_placard_preds"]
-    empty_preds_filtered = st.session_state["last_empty_preds"]
-    placard_resp = st.session_state["last_placard_resp"]
-    empty_resp = st.session_state["last_empty_resp"]
-    img_w = st.session_state["last_img_w"]
-    img_h = st.session_state["last_img_h"]
-    pil_image = Image.open(BytesIO(st.session_state["last_img_bytes"]))
+if "results_list" in st.session_state and st.session_state["results_list"]:
+    for item in st.session_state["results_list"]:
+        pil_image = Image.open(BytesIO(item["img_bytes"]))
+        img_w = item["img_w"]
+        img_h = item["img_h"]
+        placard_preds_filtered = item["placard_preds"]
+        empty_preds_filtered = item["empty_preds"]
+        placard_resp = item["placard_resp"]
+        empty_resp = item["empty_resp"]
 
-    if st.session_state.get("last_mock_mode"):
-        st.info("Mock Mode is ON — using sample predictions (no API call made).")
+        st.divider()
+        st.subheader(item["filename"])
 
-    # Convert PIL image to BGR for blue-based perspective detection
-    image_bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR) if perspective_mode else None
+        if item.get("mock_mode"):
+            st.info("Mock Mode is ON — using sample predictions (no API call made).")
 
-    # Re-run fitting with current slider values every time
-    results = estimate_total_capacity(
-        empty_space_predictions=empty_preds_filtered,
-        placard_predictions=placard_preds_filtered,
-        img_h=img_h,
-        img_w=img_w,
-        default_placard_w=int(default_placard_w),
-        default_placard_h=int(default_placard_h),
-        margin=int(outer_margin),
-        spacing=int(spacing),
-        min_confidence=0.0,  # already pre-filtered
-        estimate_size_from_detections=estimate_from_detections,
-        placard_scale=placard_scale / 100.0,
-        empty_space_scale=empty_space_scale / 100.0,
-        perspective_mode=perspective_mode,
-        image_bgr=image_bgr,
-        grid_mode=grid_mode,
-    )
+        image_bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR) if perspective_mode else None
 
-    # Re-render annotated image with current placements
-    annotated = render_annotated_image(
-        pil_image=pil_image,
-        placard_predictions=placard_preds_filtered,
-        empty_space_predictions=empty_preds_filtered,
-        per_region=results["per_region"],
-        min_confidence=0.0,
-        grid=results.get("grid"),
-        sign_quad=results.get("sign_quad"),
-    )
-
-    # -------------------------------------------------------------------------
-    # Results display
-    # -------------------------------------------------------------------------
-
-    st.divider()
-    col_img, col_stats = st.columns([3, 1])
-
-    with col_img:
-        st.subheader("Annotated Image")
-        st.caption(
-            "**Green** = existing placards   "
-            "**Orange** = empty regions   "
-            "**Cyan** = proposed new placements"
+        results = estimate_total_capacity(
+            empty_space_predictions=empty_preds_filtered,
+            placard_predictions=placard_preds_filtered,
+            img_h=img_h,
+            img_w=img_w,
+            default_placard_w=int(default_placard_w),
+            default_placard_h=int(default_placard_h),
+            margin=int(outer_margin),
+            spacing=int(spacing),
+            min_confidence=0.0,
+            estimate_size_from_detections=estimate_from_detections,
+            placard_scale=placard_scale / 100.0,
+            empty_space_scale=empty_space_scale / 100.0,
+            perspective_mode=perspective_mode,
+            image_bgr=image_bgr,
+            grid_mode=grid_mode,
         )
-        st.image(annotated, use_container_width=True)
 
-    with col_stats:
-        st.subheader("Results")
-        n_regions = len([r for r in results["per_region"] if r.get("count", 0) > 0])
-        st.metric(
-            "Estimated New Placard Slots",
-            results["total_fit"],
-            delta=f"across {n_regions} region(s)" if n_regions else None,
-            delta_color="off",
-            help="Total number of new placard positions that fit across all detected empty regions.",
+        annotated = render_annotated_image(
+            pil_image=pil_image,
+            placard_predictions=placard_preds_filtered,
+            empty_space_predictions=empty_preds_filtered,
+            per_region=results["per_region"],
+            min_confidence=0.0,
+            grid=results.get("grid"),
+            sign_quad=results.get("sign_quad"),
         )
-        st.metric("Placard Width Used (px)", results["placard_w"])
-        st.metric("Placard Height Used (px)", results["placard_h"])
 
-    # -------------------------------------------------------------------------
-    # Debug panel
-    # -------------------------------------------------------------------------
+        col_img, col_stats = st.columns([3, 1])
 
-    st.divider()
-    st.subheader("Debug Panel")
+        with col_img:
+            st.caption(
+                "**Green** = existing placards   "
+                "**Orange** = empty regions   "
+                "**Cyan** = proposed new placements"
+            )
+            st.image(annotated, use_container_width=True)
 
-    debug_cols = st.columns(4)
-    debug_cols[0].metric("Placards Detected", len(placard_preds_filtered))
-    debug_cols[1].metric("Empty Regions Detected", len(empty_preds_filtered))
-    debug_cols[2].info(
-        "Perspective mode" if results["used_perspective_mode"]
-        else ("Polygon mode" if results["used_polygon_mode"] else "Bbox fallback")
-    )
-    debug_cols[3].metric("Regions with fits", sum(1 for r in results["per_region"] if r["count"] > 0))
+        with col_stats:
+            n_regions = len([r for r in results["per_region"] if r.get("count", 0) > 0])
+            st.metric(
+                "Estimated New Placard Slots",
+                results["total_fit"],
+                delta=f"across {n_regions} region(s)" if n_regions else None,
+                delta_color="off",
+                help="Total number of new placard positions that fit across all detected empty regions.",
+            )
+            st.metric("Placard Width Used (px)", results["placard_w"])
+            st.metric("Placard Height Used (px)", results["placard_h"])
 
-    if results["per_region"]:
-        st.write("**Count per empty region:**")
-        region_data = [
-            {
-                "Region": f"Region {r['region_index'] + 1}",
-                "Placards fit": r["count"],
-                "Mode": (
-                    "perspective" if r.get("used_perspective")
-                    else ("polygon" if r.get("used_polygon") else "bbox")
-                ),
-            }
-            for r in results["per_region"]
-        ]
-        st.table(region_data)
+        # --- Sign quad debug (no API calls — uses cached detections) ---
+        with st.expander("🔍 Sign Outline Preview"):
+            st.caption(
+                "Shows the sign boundary box computed from the detected placard and empty-region "
+                "positions. No extra API call is made — this reuses the predictions already fetched above."
+            )
+            _bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            _quad = detect_sign_quad_from_detections(_bgr, placard_preds_filtered, empty_preds_filtered)
+            if _quad:
+                _preview = draw_sign_quad(_bgr.copy(), _quad)
+                _preview = cv2.cvtColor(_preview, cv2.COLOR_BGR2RGB)
+                st.image(_preview, use_container_width=True)
+                st.success(
+                    "Sign boundary corners: "
+                    + ", ".join(f"({p['x']:.0f}, {p['y']:.0f})" for p in _quad)
+                )
+            else:
+                st.image(np.array(pil_image), use_container_width=True)
+                st.warning("Could not compute sign boundary — no detections available.")
 
-    # -------------------------------------------------------------------------
-    # Raw JSON
-    # -------------------------------------------------------------------------
+        # --- Debug metrics ---
+        with st.expander("📊 Debug Details"):
+            debug_cols = st.columns(4)
+            debug_cols[0].metric("Placards Detected", len(placard_preds_filtered))
+            debug_cols[1].metric("Empty Regions Detected", len(empty_preds_filtered))
+            debug_cols[2].info(
+                "Perspective mode" if results["used_perspective_mode"]
+                else ("Polygon mode" if results["used_polygon_mode"] else "Bbox fallback")
+            )
+            debug_cols[3].metric("Regions with fits", sum(1 for r in results["per_region"] if r["count"] > 0))
 
-    st.divider()
-    with st.expander("Raw JSON — Placard Model Response"):
-        st.json(placard_resp)
+            if results["per_region"]:
+                st.write("**Count per empty region:**")
+                region_data = [
+                    {
+                        "Region": f"Region {r['region_index'] + 1}",
+                        "Placards fit": r["count"],
+                        "Mode": (
+                            "perspective" if r.get("used_perspective")
+                            else ("polygon" if r.get("used_polygon") else "bbox")
+                        ),
+                    }
+                    for r in results["per_region"]
+                ]
+                st.table(region_data)
 
-    with st.expander("Raw JSON — Empty-Space Model Response"):
-        st.json(empty_resp)
+        # --- Raw JSON ---
+        with st.expander("Raw JSON — Placard Model Response"):
+            st.json(placard_resp)
+        with st.expander("Raw JSON — Empty-Space Model Response"):
+            st.json(empty_resp)
 
-elif uploaded_file is None and "last_placard_preds" not in st.session_state:
-    st.info("Upload an image to get started.")
+elif not uploaded_files and "results_list" not in st.session_state:
+    st.info("Upload one or more images to get started.")
