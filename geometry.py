@@ -105,11 +105,12 @@ def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
     """
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
 
-    # Highway blue signs: high saturation deep blue, moderate-low brightness.
-    # Key distinction from sky: sky is bright (V > 160) and less saturated (S < 120).
-    # Using tighter saturation and value bounds to avoid picking up sky blue.
-    lower_blue = np.array([90, 120, 40], dtype=np.uint8)
-    upper_blue = np.array([130, 255, 165], dtype=np.uint8)
+    # Highway blue signs: highly saturated blue, moderate brightness.
+    # Sky blue is less saturated (S < 100) and brighter (V > 200).
+    # Raising the saturation floor to 100 excludes most sky while still
+    # capturing sign panels whose value can span a wide range with lighting.
+    lower_blue = np.array([90, 100, 40], dtype=np.uint8)
+    upper_blue = np.array([130, 255, 215], dtype=np.uint8)
     mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
     # Morphological cleanup — close small holes, remove noise
@@ -121,20 +122,34 @@ def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
     if not contours:
         return None
 
-    # Use the largest blue contour (the sign panel)
-    largest = max(contours, key=cv2.contourArea)
-
-    # Must cover at least 5% of the image to be plausible
     img_area = img_bgr.shape[0] * img_bgr.shape[1]
-    if cv2.contourArea(largest) < 0.05 * img_area:
+    min_area = 0.05 * img_area
+
+    # Among candidates that are large enough, prefer the most "solid" one —
+    # i.e. highest ratio of contour area to bounding-rect area.  A sign panel
+    # is a dense filled rectangle (ratio ≈ 0.8–1.0) whereas sky or scattered
+    # background blue has a low ratio.  This discriminates sky from sign even
+    # when sky pixels survive the colour threshold.
+    best = None
+    best_score = -1.0
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_area:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+        bbox_area = w * h
+        fill_ratio = area / bbox_area if bbox_area > 0 else 0.0
+        # Score = fill_ratio so the most solid/rectangular region wins
+        if fill_ratio > best_score:
+            best_score = fill_ratio
+            best = (x, y, w, h)
+
+    if best is None:
         return None
 
-    # Use the axis-aligned bounding rectangle of the contour.
-    # Highway signs have horizontal/vertical edges regardless of camera angle, so
-    # an axis-aligned bbox gives corners that are parallel with the sign panel.
-    # minAreaRect was rotating the result whenever sky or background crept into the
-    # detected region; axis-aligned bbox is immune to that artifact.
-    x, y, w, h = cv2.boundingRect(largest)
+    x, y, w, h = best
+    # Use the axis-aligned bounding rectangle so the 4 corners are always
+    # parallel with the sign's horizontal/vertical edges.
     return [
         {"x": float(x),     "y": float(y)},      # TL
         {"x": float(x + w), "y": float(y)},      # TR
