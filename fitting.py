@@ -21,7 +21,7 @@ from geometry import (
     prediction_to_mask,
     compute_region_homography,
     simplify_polygon_to_quad,
-    detect_sign_quad_from_blue,
+    detect_sign_quad,
 )
 
 
@@ -531,7 +531,7 @@ def estimate_total_capacity(
     # (A previous ROI-guided approach using detection bounding boxes returned
     # wrong/tiny quads when predictions were tight or used mock coordinates.)
     if (perspective_mode or grid_mode) and image_bgr is not None:
-        sign_quad = detect_sign_quad_from_blue(image_bgr)
+        sign_quad = detect_sign_quad(image_bgr)
     if perspective_mode and sign_quad is not None:
         H_s, H_s_inv, dst_w_s, dst_h_s = compute_region_homography(sign_quad)
         sign_homography = (H_s, H_s_inv, dst_w_s, dst_h_s)

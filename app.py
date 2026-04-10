@@ -28,7 +28,7 @@ from roboflow_client import (
     MOCK_EMPTY_SPACE_RESPONSE,
 )
 from fitting import estimate_total_capacity
-from geometry import detect_sign_quad_from_blue, detect_sign_quad
+from geometry import detect_sign_quad
 from visualize import render_annotated_image, draw_sign_quad, draw_sign_corner_grid
 
 
