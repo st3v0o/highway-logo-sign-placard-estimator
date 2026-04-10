@@ -97,6 +97,7 @@ def detect_sign_quad_from_blue(
     v_max: int = 200,
     open_k: int = 20,
     outlier_mult: float = 1.3,
+    _work_width: int = 1000,
 ) -> list[dict] | None:
     """
     Detect the 4 corners of the blue highway sign panel directly from pixel colors.
@@ -106,22 +107,37 @@ def detect_sign_quad_from_blue(
     img_bgr      : BGR image array
     s_min        : HSV saturation floor (0–255); raise to exclude sky
     v_max        : HSV value ceiling (0–255); lower to exclude bright sky
-    open_k       : morphological opening kernel size; larger severs wider sky bridges
+    open_k       : morphological opening kernel size at the internal working width
     outlier_mult : hull points farther than (outlier_mult × median_dist) are pruned
+    _work_width  : image is resized to this width internally so kernel sizes stay
+                   consistent regardless of the camera's megapixel count; corners
+                   are scaled back to original resolution before returning.
 
     Returns a list of 4 {"x", "y"} dicts in [TL, TR, BR, BL] order,
     or None if the blue region cannot be found.
     """
-    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    orig_h, orig_w = img_bgr.shape[:2]
+
+    # ── Work at a fixed internal resolution so kernel sizes are predictable ──
+    scale = _work_width / orig_w
+    work_h = int(orig_h * scale)
+    if scale < 0.99:          # only resize if meaningfully different
+        img_work = cv2.resize(img_bgr, (_work_width, work_h),
+                              interpolation=cv2.INTER_AREA)
+    else:
+        img_work = img_bgr
+        scale = 1.0
+
+    hsv = cv2.cvtColor(img_work, cv2.COLOR_BGR2HSV)
 
     # Highway blue signs: highly saturated, moderately bright blue.
     # Clear sky is low-saturation and very bright (S ≈ 60-90, V > 200).
-    lower_blue = np.array([90, s_min, 40],       dtype=np.uint8)
-    upper_blue = np.array([130, 255,  v_max],    dtype=np.uint8)
+    lower_blue = np.array([90, s_min, 40],    dtype=np.uint8)
+    upper_blue = np.array([130, 255, v_max],  dtype=np.uint8)
     mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
-    # Open first (remove thin sky bridges connecting sign to sky blobs),
-    # then close (fill internal holes / gaps in the sign body).
+    # Open first (remove thin bridges connecting sign panels to each other or
+    # to sky blobs), then close (fill internal holes / text gaps in the sign body).
     k_open  = np.ones((open_k, open_k), np.uint8)
     k_close = np.ones((25, 25),         np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
@@ -131,23 +147,26 @@ def detect_sign_quad_from_blue(
     if not contours:
         return None
 
-    img_area = img_bgr.shape[0] * img_bgr.shape[1]
+    img_area = img_work.shape[0] * img_work.shape[1]
     min_area = 0.05 * img_area
 
-    # Among candidates large enough, prefer the most "solid" one —
-    # sign panels are dense rectangles (fill-ratio ≈ 0.8–1.0); scattered
-    # sky blobs have a much lower fill-ratio.
+    # Among large-enough candidates, prefer the one with the largest area whose
+    # centroid is in the lower portion of the image.  Highway logo sign main
+    # panels are always below header panels (EXIT / 771B), so weighting by
+    # centroid_y picks the main panel over a smaller header even when they have
+    # similar fill ratios.
     best_score = -1.0
     best_cnt = None
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < min_area:
             continue
-        bx, by, bw, bh = cv2.boundingRect(cnt)
-        bbox_area = bw * bh
-        fill_ratio = area / bbox_area if bbox_area > 0 else 0.0
-        if fill_ratio > best_score:
-            best_score = fill_ratio
+        M = cv2.moments(cnt)
+        cy_frac = (M["m01"] / M["m00"]) / img_work.shape[0] if M["m00"] > 0 else 0.5
+        # Score = area × (1 + centroid_y_fraction) — larger area AND lower position wins
+        score = area * (1.0 + cy_frac)
+        if score > best_score:
+            best_score = score
             best_cnt = cnt
 
     if best_cnt is None:
@@ -174,7 +193,16 @@ def detect_sign_quad_from_blue(
     rect = cv2.minAreaRect(hull_pts)
     box  = cv2.boxPoints(rect)           # 4 corners, arbitrary order
     box  = np.float32(box)
-    return _four_extreme_hull_points(box)
+    quad = _four_extreme_hull_points(box)
+    if quad is None:
+        return None
+
+    # Scale corners back to original (full-resolution) coordinate space
+    if scale != 1.0:
+        for pt in quad:
+            pt["x"] = pt["x"] / scale
+            pt["y"] = pt["y"] / scale
+    return quad
 
 
 def detect_sign_quad_from_detections(
