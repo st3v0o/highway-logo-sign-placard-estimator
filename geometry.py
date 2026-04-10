@@ -798,7 +798,21 @@ def detect_sign_quad(
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     best_sc, best_q = candidates[0]
-    return best_q if best_sc >= 0.02 else None
+    if best_sc < 0.02:
+        return None
+
+    # ── Parallelogram TR fix ───────────────────────────────────────────────
+    # EXIT-sign caps in the upper-right corner of highway signs inflate the
+    # detected TR corner upward regardless of which detection method won.
+    # The three lower-corner points (TL, BL, BR) are reliable, so we infer
+    # TR = TL + (BR − BL), the parallelogram rule.  This gives the correct
+    # top-right corner of the *main* sign body without any sky/cap influence.
+    tl_d, tr_d, br_d, bl_d = best_q   # each is {"x": …, "y": …}
+    tr_fixed = {
+        "x": tl_d["x"] + br_d["x"] - bl_d["x"],
+        "y": tl_d["y"] + br_d["y"] - bl_d["y"],
+    }
+    return [tl_d, tr_fixed, br_d, bl_d]
 
 
 def detect_sign_quad_from_detections(
