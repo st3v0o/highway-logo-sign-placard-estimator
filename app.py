@@ -439,7 +439,14 @@ if "last_placard_preds" in st.session_state:
 
     with col_stats:
         st.subheader("Results")
-        st.metric("Estimated Available Positions", results["total_fit"])
+        n_regions = len([r for r in results["per_region"] if r.get("count", 0) > 0])
+        st.metric(
+            "Estimated New Placard Slots",
+            results["total_fit"],
+            delta=f"across {n_regions} region(s)" if n_regions else None,
+            delta_color="off",
+            help="Total number of new placard positions that fit across all detected empty regions.",
+        )
         st.metric("Placard Width Used (px)", results["placard_w"])
         st.metric("Placard Height Used (px)", results["placard_h"])
 

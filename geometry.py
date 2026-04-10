@@ -232,7 +232,9 @@ def detect_sign_quad_from_detections(
     mx = int(det_w * roi_expand)
     my = int(det_h * roi_expand)
     roi_x1 = max(0,     int(det_x1) - mx)
-    roi_y1 = max(0,     int(det_y1) - my)
+    # Expand LESS upward: the sign border is thin (~10% of height) but
+    # adjacent exit signs live just above and get pulled in by a large expansion.
+    roi_y1 = max(0,     int(det_y1) - my // 2)
     roi_x2 = min(img_w, int(det_x2) + mx)
     roi_y2 = min(img_h, int(det_y2) + my)
 
@@ -249,13 +251,20 @@ def detect_sign_quad_from_detections(
         np.array([135, 255, 255], dtype=np.uint8),
     )
 
+    # Open first to break thin pixel bridges between adjacent sign panels
+    # (e.g. EXIT sign above the main panel), then close to fill internal gaps.
+    ko = np.ones((7, 7),   np.uint8)
     kc = np.ones((15, 15), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  ko)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kc)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
 
+    # The main sign panel is the largest blue region by area.
+    # After the opening step, adjacent smaller panels (EXIT sign etc.) are
+    # separate contours and will be smaller.
     best_cnt = max(contours, key=cv2.contourArea)
     if cv2.contourArea(best_cnt) < 0.04 * roi.shape[0] * roi.shape[1]:
         return None
