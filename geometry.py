@@ -105,18 +105,20 @@ def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
     """
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
 
-    # Highway blue signs: highly saturated blue, moderate brightness.
-    # Sky blue is less saturated (S < 100) and brighter (V > 200).
-    # Raising the saturation floor to 100 excludes most sky while still
-    # capturing sign panels whose value can span a wide range with lighting.
-    lower_blue = np.array([90, 100, 40], dtype=np.uint8)
-    upper_blue = np.array([130, 255, 215], dtype=np.uint8)
+    # Highway blue signs: highly saturated, moderately bright blue.
+    # Clear sky is low-saturation and very bright (S ≈ 60-90, V > 200).
+    # S ≥ 120 and V ≤ 200 reliably separates sign blue from sky blue
+    # across different lighting conditions.
+    lower_blue = np.array([90, 120, 40], dtype=np.uint8)
+    upper_blue = np.array([130, 255, 200], dtype=np.uint8)
     mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
-    # Morphological cleanup — close small holes, remove noise
-    k = np.ones((15, 15), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+    # Open first (remove thin sky bridges connecting sign to sky blobs),
+    # then close (fill internal holes / gaps in the sign body).
+    k_open  = np.ones((9,  9),  np.uint8)
+    k_close = np.ones((21, 21), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -125,11 +127,9 @@ def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
     img_area = img_bgr.shape[0] * img_bgr.shape[1]
     min_area = 0.05 * img_area
 
-    # Among candidates that are large enough, prefer the most "solid" one —
-    # i.e. highest ratio of contour area to bounding-rect area.  A sign panel
-    # is a dense filled rectangle (ratio ≈ 0.8–1.0) whereas sky or scattered
-    # background blue has a low ratio.  This discriminates sky from sign even
-    # when sky pixels survive the colour threshold.
+    # Among candidates large enough, prefer the most "solid" one —
+    # sign panels are dense rectangles (fill-ratio ≈ 0.8–1.0); scattered
+    # sky blobs have a much lower fill-ratio.
     best_score = -1.0
     best_cnt = None
     for cnt in contours:
@@ -139,7 +139,6 @@ def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
         bx, by, bw, bh = cv2.boundingRect(cnt)
         bbox_area = bw * bh
         fill_ratio = area / bbox_area if bbox_area > 0 else 0.0
-        # Pick the most solid/rectangular region (sign >> scattered sky)
         if fill_ratio > best_score:
             best_score = fill_ratio
             best_cnt = cnt
@@ -147,12 +146,15 @@ def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
     if best_cnt is None:
         return None
 
-    # Use the four extreme hull points (min/max of x+y and x-y) to get the
-    # true perspective corners of the sign as it appears in the photo.
-    # This correctly captures any trapezoidal shape from camera angle while
-    # remaining much more stable than approxPolyDP on complex contours.
-    hull_pts = cv2.convexHull(best_cnt).reshape(-1, 2).astype(np.float32)
-    return _four_extreme_hull_points(hull_pts)
+    # Use the minimum-area rotated bounding box (minAreaRect) as the quad.
+    # This is far more stable than convex-hull extreme points: the rectangle
+    # is anchored to the dense center of the contour mass, so a handful of
+    # stray sky pixels at the edge cannot "pull" a corner far off the sign.
+    # It also naturally captures any rotation/tilt from camera angle.
+    rect = cv2.minAreaRect(best_cnt)
+    box  = cv2.boxPoints(rect)           # 4 corners, arbitrary order
+    box  = np.float32(box)
+    return _four_extreme_hull_points(box)
 
 
 def simplify_polygon_to_quad(points: list[dict]) -> list[dict] | None:
