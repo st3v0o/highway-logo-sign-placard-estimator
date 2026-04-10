@@ -349,7 +349,13 @@ def _hough_to_quad(
     right_segs = v_sorted[-k_v:]
 
     def fit_abc(segs):
-        """Return (a, b, c) of normalised line  ax + by + c = 0."""
+        """Return (a, b, c) of normalised line  ax + by + c = 0.
+
+        cv2.fitLine returns (vx, vy, cx, cy) where (vx,vy) is the unit
+        direction and (cx,cy) is a point on the line.
+        Normal form:  a = -vy,  b = vx,  c = vy*cx - vx*cy
+        (verified:  a*cx + b*cy + c = -vy*cx + vx*cy + vy*cx - vx*cy = 0 ✓)
+        """
         pts = np.array([[(s[0] + s[2]) / 2, (s[1] + s[3]) / 2] for s in segs],
                        dtype=np.float32)
         if len(pts) == 1:
@@ -360,7 +366,7 @@ def _hough_to_quad(
             vx, vy, cx, cy = [float(v) for v in
                                cv2.fitLine(pts.reshape(-1, 1, 2), cv2.DIST_L2, 0, 0.01, 0.01)]
             a, b = -vy, vx
-            c = cy * vy - cx * vx
+            c = vy * cx - vx * cy   # NOT cy*vy - cx*vx (that swaps cx/cy roles)
         n = max(float(np.sqrt(a * a + b * b)), 1e-9)
         return a / n, b / n, c / n
 
@@ -390,6 +396,12 @@ def _hough_to_quad(
         [br[0] + roi_x1, br[1] + roi_y1],
         [bl[0] + roi_x1, bl[1] + roi_y1],
     ], dtype=np.float32)
+
+    # Sanity: near-parallel line pairs produce intersections at huge coordinates.
+    # Reject the result if any corner is implausibly far from the image.
+    if any(abs(p[0]) > 1e4 or abs(p[1]) > 1e4 for p in pts):
+        return None
+
     return _four_extreme_hull_points(pts)
 
 
