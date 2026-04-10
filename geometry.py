@@ -183,17 +183,23 @@ def detect_sign_quad_from_detections(
     empty_predictions: list[dict],
 ) -> list[dict] | None:
     """
-    Derive the sign boundary quad directly from the detection bounding boxes.
+    Two-phase sign boundary detection.
 
-    All detected placards and empty regions lie *inside* the sign, so the
-    union of their bounding boxes — expanded outward to include the sign
-    header, border, and any undetected edges — IS the sign boundary.
+    Phase 1 — tight ROI from detections
+        All detected objects lie inside the sign.  Expand by a small
+        image-relative margin (not detection-relative — that blows up when
+        detections already fill most of the frame).  4 % of image height
+        upward keeps adjacent panels (e.g. EXIT signs) out of the crop; the
+        blue detection in phase 2 recovers the header row from colour alone.
 
-    This is intentionally bbox-only (no blue HSV detection).  HSV-based
-    approaches are sensitive to sky colour, tree shadows, and adjacent sign
-    panels that bleed into the crop, and can produce wildly wrong corners
-    (bowtie / crossed quads).  The bbox union approach is deterministic and
-    robust across all lighting conditions.
+    Phase 2 — blue detection inside the ROI
+        Within the tight crop the background is eliminated, so permissive HSV
+        thresholds cleanly isolate the sign body.  A single closing pass fills
+        placard cut-outs and text gaps.  approxPolyDP on the convex hull yields
+        exactly 4 corners — trapezoidal for angled shots, near-rectangular for
+        frontal ones.
+
+    Falls back to a plain bbox rectangle if colour detection fails.
 
     Returns 4 corner dicts in [TL, TR, BR, BL] order, or None on failure.
     """
@@ -202,6 +208,7 @@ def detect_sign_quad_from_detections(
     if not all_preds:
         return None
 
+    # --- collect all detection corners ---
     xs: list[float] = []
     ys: list[float] = []
     for pred in all_preds:
@@ -221,30 +228,78 @@ def detect_sign_quad_from_detections(
     det_x1, det_x2 = min(xs), max(xs)
     det_y1, det_y2 = min(ys), max(ys)
 
-    # Padding based on IMAGE dimensions, not detection span.
-    #
-    # Detection-relative padding fails when detections already fill most of
-    # the image (e.g. Popeyes sign: det_h ≈ 700 px → 35 % ≈ 245 px upward,
-    # pushing the box far above the sign into the EXIT panel or sky).
-    #
-    # Image-relative padding is constant regardless of how much of the sign
-    # is already covered by detections:
-    #   • 6 % left / right  — sign side border + small margin
-    #   • 10 % upward        — sign header row ("GAS / FOOD / EXIT …")
-    #   • 4 % downward       — sign bottom border only
-    pad_x  = img_w * 0.06
-    pad_yu = img_h * 0.10
-    pad_yd = img_h * 0.04
+    # --- Phase 1: tight ROI (image-relative, never detection-relative) ---
+    # Upward: 4 % — just the sign top border.  Blue detection in phase 2
+    #   will extend up to the actual sign edge within the crop.
+    # Downward / horizontal: 5 % — sign border on remaining three sides.
+    pad_x  = img_w * 0.05
+    pad_yu = img_h * 0.04
+    pad_yd = img_h * 0.05
 
-    q_x1 = max(0.0,          det_x1 - pad_x)
-    q_y1 = max(0.0,          det_y1 - pad_yu)
-    q_x2 = min(float(img_w), det_x2 + pad_x)
-    q_y2 = min(float(img_h), det_y2 + pad_yd)
+    roi_x1 = max(0,     int(det_x1 - pad_x))
+    roi_y1 = max(0,     int(det_y1 - pad_yu))
+    roi_x2 = min(img_w, int(det_x2 + pad_x))
+    roi_y2 = min(img_h, int(det_y2 + pad_yd))
 
-    corners = np.array(
-        [[q_x1, q_y1], [q_x2, q_y1], [q_x2, q_y2], [q_x1, q_y2]],
-        dtype=np.float32,
+    roi = img_bgr[roi_y1:roi_y2, roi_x1:roi_x2]
+    if roi.size == 0:
+        return _bbox_quad(det_x1, det_y1, det_x2, det_y2, img_w, img_h)
+
+    # --- Phase 2: blue detection inside the ROI ---
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    # Highway-sign royal blue: hue 95–130, moderate-to-high saturation,
+    # low-to-medium brightness (excludes bright sky and white text areas).
+    mask = cv2.inRange(
+        hsv,
+        np.array([90,  70,  25], dtype=np.uint8),
+        np.array([135, 255, 220], dtype=np.uint8),
     )
+
+    # Close only — fill placard cutouts and text gaps without breaking
+    # connections between sign regions.
+    kc = np.ones((15, 15), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kc)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return _bbox_quad(det_x1, det_y1, det_x2, det_y2, img_w, img_h)
+
+    best = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(best) < 0.04 * roi.shape[0] * roi.shape[1]:
+        return _bbox_quad(det_x1, det_y1, det_x2, det_y2, img_w, img_h)
+
+    hull = cv2.convexHull(best)
+    peri = cv2.arcLength(hull, True)
+    quad_pts: np.ndarray | None = None
+    for eps in [0.02, 0.04, 0.06, 0.08, 0.10, 0.13, 0.16, 0.20, 0.25]:
+        approx = cv2.approxPolyDP(hull, eps * peri, True)
+        if len(approx) == 4:
+            quad_pts = approx.reshape(-1, 2).astype(np.float32)
+            break
+
+    if quad_pts is None:
+        rect = cv2.minAreaRect(hull)
+        quad_pts = cv2.boxPoints(rect).astype(np.float32)
+
+    # Translate ROI-local → full image
+    quad_pts[:, 0] += roi_x1
+    quad_pts[:, 1] += roi_y1
+
+    return _four_extreme_hull_points(quad_pts)
+
+
+def _bbox_quad(
+    x1: float, y1: float, x2: float, y2: float,
+    img_w: int, img_h: int,
+) -> list[dict]:
+    """Plain detection-union rectangle, used as fallback."""
+    pad = min(img_w, img_h) * 0.04
+    corners = np.array([
+        [max(0.0, x1 - pad), max(0.0, y1 - pad)],
+        [min(float(img_w), x2 + pad), max(0.0, y1 - pad)],
+        [min(float(img_w), x2 + pad), min(float(img_h), y2 + pad)],
+        [max(0.0, x1 - pad), min(float(img_h), y2 + pad)],
+    ], dtype=np.float32)
     return _four_extreme_hull_points(corners)
 
 
