@@ -26,7 +26,7 @@ from roboflow_client import (
     MOCK_EMPTY_SPACE_RESPONSE,
 )
 from fitting import estimate_total_capacity
-from geometry import detect_sign_quad_from_detections
+from geometry import detect_sign_quad_from_detections, detect_sign_quad_from_blue
 from visualize import render_annotated_image, draw_sign_quad
 
 
@@ -244,11 +244,89 @@ uploaded_files = st.file_uploader(
     help="Drag and drop or click to browse. You can select multiple images at once.",
 )
 
-run_button = st.button(
-    "Run Inference",
-    type="primary",
-    disabled=not uploaded_files,
-)
+_btn_col1, _btn_col2 = st.columns([2, 1])
+with _btn_col1:
+    run_button = st.button(
+        "Run Inference",
+        type="primary",
+        disabled=not uploaded_files,
+        use_container_width=True,
+    )
+with _btn_col2:
+    grid_button = st.button(
+        "Generate Grid",
+        disabled=not uploaded_files,
+        use_container_width=True,
+        help=(
+            "Detects the sign boundary from blue-pixel colour analysis and draws the "
+            "perspective grid — no API call needed. Use this to verify grid alignment "
+            "before (or instead of) running inference."
+        ),
+    )
+
+# ---------------------------------------------------------------------------
+# Grid preview — colour-based, no API call.
+# ---------------------------------------------------------------------------
+
+if grid_button and uploaded_files:
+    st.divider()
+    st.subheader("Grid Preview (colour-based, no API)")
+    grid_preview_list = []
+    for uf in uploaded_files:
+        pil_img = Image.open(uf).convert("RGB")
+        bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        quad = detect_sign_quad_from_blue(bgr)
+        vis_bgr = bgr.copy()
+        if quad:
+            # draw quad outline
+            pts = np.array([[int(p["x"]), int(p["y"])] for p in quad], dtype=np.int32)
+            cv2.polylines(vis_bgr, [pts], True, (0, 255, 255), 3)
+            for p in quad:
+                cv2.circle(vis_bgr, (int(p["x"]), int(p["y"])), 10, (0, 0, 255), -1)
+
+            # draw perspective grid (10 cols × 6 rows)
+            COLS, ROWS = 10, 6
+            tl = np.float32([quad[0]["x"], quad[0]["y"]])
+            tr = np.float32([quad[1]["x"], quad[1]["y"]])
+            br = np.float32([quad[2]["x"], quad[2]["y"]])
+            bl = np.float32([quad[3]["x"], quad[3]["y"]])
+            for i in range(COLS + 1):
+                t = i / COLS
+                cv2.line(vis_bgr,
+                         tuple((tl + t * (tr - tl)).astype(int)),
+                         tuple((bl + t * (br - bl)).astype(int)),
+                         (0, 255, 255), 1)
+            for j in range(ROWS + 1):
+                t = j / ROWS
+                cv2.line(vis_bgr,
+                         tuple((tl + t * (bl - tl)).astype(int)),
+                         tuple((tr + t * (br - tr)).astype(int)),
+                         (0, 255, 255), 1)
+
+            status = ("Corners: " +
+                      ", ".join(f"({p['x']:.0f},{p['y']:.0f})" for p in quad))
+        else:
+            status = None
+        grid_preview_list.append({
+            "filename": uf.name,
+            "vis": cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB),
+            "quad": quad,
+            "status": status,
+        })
+    st.session_state["grid_preview_list"] = grid_preview_list
+
+if "grid_preview_list" in st.session_state and st.session_state["grid_preview_list"]:
+    for item in st.session_state["grid_preview_list"]:
+        st.markdown(f"**{item['filename']}**")
+        st.image(item["vis"], use_container_width=True)
+        if item["quad"]:
+            st.success(item["status"])
+        else:
+            st.warning(
+                "Could not detect a blue sign boundary. "
+                "Try adjusting the saturation / value settings or upload a clearer image."
+            )
+    st.divider()
 
 # ---------------------------------------------------------------------------
 # Inference — runs only when the button is clicked.
