@@ -229,6 +229,8 @@ def place_rectangles_perspective_aware(
     sign_homography: tuple | None = None,
     grid_mode: bool = False,
     placard_predictions: list[dict] | None = None,
+    raw_placard_w: int | None = None,
+    raw_placard_h: int | None = None,
 ) -> list[list[list[float]]]:
     """
     Perspective-aware placement for empty regions.
@@ -281,12 +283,16 @@ def place_rectangles_perspective_aware(
     if grid_mode and placard_predictions:
         # Project existing placard centers through H into flat space,
         # then derive a uniform row/column grid from their flat positions.
+        # Use raw (unscaled) placard dimensions for pitch so the grid spacing
+        # doesn't change when the user moves the Placard Scale slider.
+        grid_ref_w = raw_placard_w if raw_placard_w is not None else placard_w
+        grid_ref_h = raw_placard_h if raw_placard_h is not None else placard_h
         img_centers = [(float(p["x"]), float(p["y"])) for p in placard_predictions]
         flat_centers = _project_points_through_H(H, img_centers)
         # Build synthetic prediction dicts for infer_and_extend_grid
         flat_preds = [{"x": c[0], "y": c[1]} for c in flat_centers]
         flat_rows, flat_cols = infer_and_extend_grid(
-            flat_preds, placard_w, placard_h, spacing, dst_w, dst_h
+            flat_preds, grid_ref_w, grid_ref_h, spacing, dst_w, dst_h
         )
         flat_placements = place_on_grid(
             flat_rows, flat_cols, placard_w, placard_h, warped_mask
@@ -491,7 +497,13 @@ def estimate_total_capacity(
         if estimated:
             placard_w, placard_h = estimated
 
-    # Apply scale factor
+    # Keep a copy of the raw (unscaled) dimensions for grid spacing calculations.
+    # The grid pitch should reflect the actual measured placard size regardless of
+    # how the user has scaled the rendered placard.
+    raw_placard_w = placard_w
+    raw_placard_h = placard_h
+
+    # Apply scale factor to the rendered placard size only
     placard_w = max(1, int(placard_w * placard_scale))
     placard_h = max(1, int(placard_h * placard_scale))
 
@@ -528,7 +540,7 @@ def estimate_total_capacity(
     grid_col_centers: list[float] = []
     if grid_mode:
         grid_row_centers, grid_col_centers = infer_and_extend_grid(
-            placard_predictions, placard_w, placard_h, spacing, img_w, img_h
+            placard_predictions, raw_placard_w, raw_placard_h, spacing, img_w, img_h
         )
         grid_info = {"row_centers": grid_row_centers, "col_centers": grid_col_centers}
 
@@ -541,7 +553,7 @@ def estimate_total_capacity(
             flat_centers = _project_points_through_H(H_g, img_centers)
             flat_preds = [{"x": c[0], "y": c[1]} for c in flat_centers]
             flat_rows, flat_cols = infer_and_extend_grid(
-                flat_preds, placard_w, placard_h, spacing, dst_w_g, dst_h_g
+                flat_preds, raw_placard_w, raw_placard_h, spacing, dst_w_g, dst_h_g
             )
             grid_info.update({
                 "flat_row_centers": flat_rows,
@@ -579,6 +591,8 @@ def estimate_total_capacity(
                 sign_homography=sign_homography,  # None → falls back to polygon
                 grid_mode=grid_mode,
                 placard_predictions=placard_predictions,
+                raw_placard_w=raw_placard_w,
+                raw_placard_h=raw_placard_h,
             )
             if quad_placements:
                 used_perspective = True
