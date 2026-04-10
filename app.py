@@ -28,7 +28,7 @@ from roboflow_client import (
     MOCK_EMPTY_SPACE_RESPONSE,
 )
 from fitting import estimate_total_capacity
-from geometry import detect_sign_quad_from_blue
+from geometry import detect_sign_quad_from_blue, detect_sign_quad
 from visualize import render_annotated_image, draw_sign_quad, draw_sign_corner_grid
 
 
@@ -345,7 +345,7 @@ def _run_grid_on_image(pil_image: Image.Image, sign_id: str) -> dict:
     """
     pil_image = _resize_for_display(pil_image)
     bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-    quad = detect_sign_quad_from_blue(bgr)
+    quad = detect_sign_quad(bgr)
     vis_bgr = bgr.copy()
     if quad:
         vis_bgr = draw_sign_corner_grid(vis_bgr, quad)

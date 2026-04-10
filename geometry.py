@@ -529,6 +529,270 @@ def detect_sign_quad_from_blue(
     return quad
 
 
+# ── Hybrid quad-detection helpers ─────────────────────────────────────────
+# Two complementary approaches that are tried before the Hough pipeline:
+#
+#   1. _detect_quad_border  — Canny on grayscale finds the sign's white border
+#      outline.  Works well for dark-navy signs, overcast skies, and any case
+#      where the blue-mask quality is poor.
+#
+#   2. _detect_quad_adaptive — adaptive-HSV blue detection with approxPolyDP.
+#      Samples the dominant blue saturation in the image so that both vivid-
+#      blue and dark-navy signs are captured; replaces Hough with a direct
+#      convex-hull simplification.
+#
+# Both are evaluated with the same consistent "blue purity" score; the winner
+# is returned.  If both fail the Hough-based `detect_sign_quad_from_blue` is
+# used as the final fallback.
+# ──────────────────────────────────────────────────────────────────────────
+
+def _order_quad_corners(pts: np.ndarray) -> list[np.ndarray]:
+    """Order a (4,2) float32 array as [TL, TR, BR, BL]."""
+    s = pts.sum(axis=1)
+    d = pts[:, 0] - pts[:, 1]
+    return [pts[np.argmin(s)], pts[np.argmax(d)],
+            pts[np.argmax(s)], pts[np.argmin(d)]]
+
+
+def _approx_to_quad(hull: np.ndarray) -> Optional[np.ndarray]:
+    """Reduce a convex hull to 4 points via Douglas-Peucker; None if impossible."""
+    perim = cv2.arcLength(hull, True)
+    for eps in [0.01, 0.02, 0.03, 0.04, 0.06, 0.08, 0.10, 0.13, 0.17, 0.22, 0.28]:
+        approx = cv2.approxPolyDP(hull, eps * perim, True)
+        if len(approx) == 4:
+            return approx.reshape(-1, 2).astype(np.float32)
+        if len(approx) < 4:
+            break
+    return None
+
+
+def _score_quad(quad_pts_w: np.ndarray,
+                blue_loose: np.ndarray,
+                ww: int,
+                wh: int) -> float:
+    """
+    Score a quad (4×2 working-space float32) by:
+      blue_frac  = fraction of quad interior covered by the loose blue mask
+      area_frac  = quad area / image area   (promotes larger quads)
+
+    Returns blue_frac^1.5 * area_frac so that low-blue-fraction quads
+    (e.g. a contour that accidentally spans trees + sign) are strongly
+    penalised even when they have a large area.
+    Returns 0 if degenerate, too small, or corners are far outside the image.
+    """
+    # Reject quads whose corners stray more than 15 % beyond image bounds
+    margin_x, margin_y = 0.15 * ww, 0.15 * wh
+    for px, py in quad_pts_w:
+        if px < -margin_x or px > ww + margin_x:
+            return 0.0
+        if py < -margin_y or py > wh + margin_y:
+            return 0.0
+
+    qmask = np.zeros((wh, ww), np.uint8)
+    cv2.fillPoly(qmask, [quad_pts_w.astype(np.int32)], 255)
+    inside = float(qmask.sum()) / 255.0
+    if inside < 0.03 * ww * wh:
+        return 0.0
+    blue_frac = float((blue_loose & qmask).sum()) / 255.0 / inside
+    area_frac = inside / (ww * wh)
+    # blue_frac^1.5 penalises non-blue interiors much more strongly than
+    # the linear version, so large-but-mostly-non-blue quads lose.
+    return (blue_frac ** 1.5) * area_frac
+
+
+def _detect_quad_border(
+    img_bgr: np.ndarray,
+    _work_width: int = 1000,
+) -> Optional[list[dict]]:
+    """
+    Approach 1 — white-border Canny.
+
+    Highway signs have a high-contrast white border that produces very strong
+    Canny edges regardless of sign colour (vivid blue, dark navy, etc.).
+    Find the largest convex quadrilateral whose interior is mostly blue.
+    """
+    h, w = img_bgr.shape[:2]
+    ww = _work_width
+    wh = int(h * ww / w)
+    iw = cv2.resize(img_bgr, (ww, wh), interpolation=cv2.INTER_AREA)
+
+    gray = cv2.cvtColor(iw, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 1.0)
+    med  = float(np.median(blur))
+    lo   = max(10, int(0.50 * med))
+    hi   = min(255, int(1.50 * med))
+    edges = cv2.Canny(blur, lo, hi)
+    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+
+    cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+
+    # Loose blue mask (s_min=60 catches dark navy and vivid blue)
+    hsv = cv2.cvtColor(iw, cv2.COLOR_BGR2HSV)
+    blue_loose = cv2.inRange(hsv, np.array([90, 60, 30]),
+                                  np.array([130, 255, 195]))
+
+    best_score  = 0.0
+    best_result = None
+
+    for cnt in cnts:
+        if cv2.contourArea(cnt) < 0.04 * ww * wh:
+            continue
+        hull     = cv2.convexHull(cnt)
+        quad_pts = _approx_to_quad(hull)
+        if quad_pts is None:
+            continue
+        if not cv2.isContourConvex(
+                quad_pts.reshape(-1, 1, 2).astype(np.int32)):
+            continue
+        # Compute raw blue fraction first; require >35 % to reject sign+tree
+        # or sign+sky quads that happen to score high on area alone.
+        qmask_test = np.zeros((wh, ww), np.uint8)
+        cv2.fillPoly(qmask_test, [quad_pts.astype(np.int32)], 255)
+        inside_test = max(float(qmask_test.sum()) / 255.0, 1.0)
+        blue_frac_test = (float((blue_loose & qmask_test).sum()) / 255.0
+                          / inside_test)
+        if blue_frac_test < 0.35:
+            continue
+        score = _score_quad(quad_pts, blue_loose, ww, wh)
+        if score > best_score and score > 0.04:
+            best_score  = score
+            best_result = quad_pts
+
+    if best_result is None:
+        return None
+
+    tl, tr, br, bl = _order_quad_corners(best_result)
+    scale = w / ww
+    return [{"x": float(p[0] * scale), "y": float(p[1] * scale)}
+            for p in [tl, tr, br, bl]]
+
+
+def _detect_quad_adaptive(
+    img_bgr: np.ndarray,
+    _work_width: int = 1000,
+) -> Optional[list[dict]]:
+    """
+    Approach 2 — adaptive-HSV blue detection + approxPolyDP.
+
+    Samples the dominant blue saturation in the image so the threshold adapts
+    to both vivid-blue (S≈180+) and dark-navy (S≈80-130) signs.
+    Replaces Hough line fitting with a direct hull simplification.
+    """
+    h, w = img_bgr.shape[:2]
+    ww = _work_width
+    wh = int(h * ww / w)
+    iw = cv2.resize(img_bgr, (ww, wh), interpolation=cv2.INTER_AREA)
+
+    hsv = cv2.cvtColor(iw, cv2.COLOR_BGR2HSV)
+
+    # Probe: sample S-values of blue-hued pixels to set adaptive threshold
+    blue_probe = cv2.inRange(hsv, np.array([90, 30, 30]),
+                                   np.array([130, 255, 185]))
+    s_vals = hsv[:, :, 1][blue_probe > 0]
+    s_min  = int(np.percentile(s_vals, 15)) if len(s_vals) > 200 else 120
+    s_min  = max(60, min(s_min, 160))
+
+    # Build mask with adaptive s_min
+    mask = cv2.inRange(hsv, np.array([90, s_min, 30]),
+                            np.array([130, 255, 185]))
+    ko   = np.ones((12, 12), np.uint8)
+    kc   = np.ones((40, 40), np.uint8)
+    mo   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  ko)
+    mc   = cv2.morphologyEx(mo,   cv2.MORPH_CLOSE, kc)
+
+    # Sky guard (same as detect_sign_quad_from_blue)
+    sg  = max(1, int(0.05 * wh))
+    sky_end, sky_active = 0, False
+    for ri in range(int(0.18 * wh)):
+        d = float(mc[ri, :].sum()) / 255.0 / ww
+        if d > 0.50:
+            if ri < sg:
+                sky_active = True
+            if sky_active:
+                sky_end = ri + 1
+        elif d < 0.20 and sky_end > 0:
+            break
+    if sky_end > 0:
+        mc[:sky_end, :] = 0
+
+    cnts, _ = cv2.findContours(mc, cv2.RETR_EXTERNAL,
+                                cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+    cnt = max(cnts, key=cv2.contourArea)
+    if cv2.contourArea(cnt) < 0.03 * ww * wh:
+        return None
+
+    hull     = cv2.convexHull(cnt)
+    quad_pts = _approx_to_quad(hull)
+    if quad_pts is None:
+        rect     = cv2.minAreaRect(cnt)
+        quad_pts = cv2.boxPoints(rect).astype(np.float32)
+
+    # Consistent scoring with same loose blue mask
+    blue_loose = cv2.inRange(hsv, np.array([90, 60, 30]),
+                                   np.array([130, 255, 195]))
+    if _score_quad(quad_pts, blue_loose, ww, wh) < 0.02:
+        return None
+
+    tl, tr, br, bl = _order_quad_corners(quad_pts)
+    scale = w / ww
+    return [{"x": float(p[0] * scale), "y": float(p[1] * scale)}
+            for p in [tl, tr, br, bl]]
+
+
+def detect_sign_quad(
+    img_bgr: np.ndarray,
+    _work_width: int = 1000,
+) -> Optional[list[dict]]:
+    """
+    Main entry point for sign-boundary detection.
+
+    Tries three approaches in order of preference and returns the quad that
+    scores highest on a consistent 'blue purity × area' metric:
+
+      1. White-border Canny  — most robust for dark-navy and difficult skies
+      2. Adaptive-HSV + approxPolyDP  — most robust for close-up shots
+      3. Hough-line pipeline  — original fallback (existing detect_sign_quad_from_blue)
+
+    Returns a 4-element list of {"x":…, "y":…} dicts ordered
+    [TL, TR, BR, BL], or None if no sign is found.
+    """
+    h, w = img_bgr.shape[:2]
+    ww   = _work_width
+    wh   = int(h * ww / w)
+    iw   = cv2.resize(img_bgr, (ww, wh), interpolation=cv2.INTER_AREA)
+    hsv  = cv2.cvtColor(iw, cv2.COLOR_BGR2HSV)
+    blue_loose = cv2.inRange(hsv, np.array([90, 60, 30]),
+                                   np.array([130, 255, 195]))
+
+    def _to_working(quad: list[dict]) -> np.ndarray:
+        scale = ww / w
+        return np.array([[p["x"] * scale, p["y"] * scale]
+                         for p in quad], dtype=np.float32)
+
+    candidates: list[tuple[float, list[dict]]] = []
+
+    q_border   = _detect_quad_border(img_bgr, _work_width)
+    q_adaptive = _detect_quad_adaptive(img_bgr, _work_width)
+    q_hough    = detect_sign_quad_from_blue(img_bgr, _work_width=_work_width)
+
+    for q in [q_border, q_adaptive, q_hough]:
+        if q is not None:
+            pts_w = _to_working(q)
+            sc    = _score_quad(pts_w, blue_loose, ww, wh)
+            candidates.append((sc, q))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    best_sc, best_q = candidates[0]
+    return best_q if best_sc >= 0.02 else None
+
+
 def detect_sign_quad_from_detections(
     img_bgr: np.ndarray,
     placard_predictions: list[dict],
