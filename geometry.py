@@ -115,8 +115,10 @@ def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
 
     # Open first (remove thin sky bridges connecting sign to sky blobs),
     # then close (fill internal holes / gaps in the sign body).
-    k_open  = np.ones((9,  9),  np.uint8)
-    k_close = np.ones((21, 21), np.uint8)
+    # A 20×20 kernel severs pixel bridges up to ~10px wide, which covers
+    # typical sky-through-tree connections at the sign edges.
+    k_open  = np.ones((20, 20), np.uint8)
+    k_close = np.ones((25, 25), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
 
@@ -146,12 +148,25 @@ def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
     if best_cnt is None:
         return None
 
-    # Use the minimum-area rotated bounding box (minAreaRect) as the quad.
-    # This is far more stable than convex-hull extreme points: the rectangle
-    # is anchored to the dense center of the contour mass, so a handful of
-    # stray sky pixels at the edge cannot "pull" a corner far off the sign.
-    # It also naturally captures any rotation/tilt from camera angle.
-    rect = cv2.minAreaRect(best_cnt)
+    # Build the convex hull of the winning contour, then prune outlier hull
+    # points before fitting minAreaRect.  Stray sky pixels that survived
+    # morphological cleanup sit far from the sign's centre and will be cut.
+    hull_pts = cv2.convexHull(best_cnt).reshape(-1, 2).astype(np.float32)
+
+    if len(hull_pts) > 4:
+        centroid  = hull_pts.mean(axis=0)
+        dists     = np.linalg.norm(hull_pts - centroid, axis=1)
+        med_dist  = float(np.median(dists))
+        # Allow points up to 1.5× the median distance — sign corners are
+        # roughly equidistant from the centroid; sky outliers are much farther.
+        threshold = med_dist * 1.5
+        cleaned   = hull_pts[dists <= threshold]
+        if len(cleaned) >= 4:
+            hull_pts = cleaned
+
+    # minAreaRect is anchored to the dense contour mass; even a few outlier
+    # edge pixels can't pull a corner far off the sign.
+    rect = cv2.minAreaRect(hull_pts)
     box  = cv2.boxPoints(rect)           # 4 corners, arbitrary order
     box  = np.float32(box)
     return _four_extreme_hull_points(box)
