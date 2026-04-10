@@ -489,17 +489,9 @@ def detect_sign_quad_from_blue(
             right = fit_abc_local(right_segs)
 
             tl = intersect_local(top, left)
+            tr = intersect_local(top, right)
             br = intersect_local(bot, right)
             bl = intersect_local(bot, left)
-
-            # TR is inferred from the parallelogram rule (TL + BR − BL) so
-            # EXIT-sign caps in the upper-right corner cannot distort it.
-            # We still need the right-edge line only for BR; the top-edge line
-            # for the right side is intentionally ignored here.
-            if tl is not None and bl is not None and br is not None:
-                tr = (tl[0] + br[0] - bl[0], tl[1] + br[1] - bl[1])
-            else:
-                tr = intersect_local(top, right)  # last-resort fallback
 
             if any(pt is None for pt in [tl, tr, br, bl]):
                 quad = _minAreaRect_fallback()
