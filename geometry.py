@@ -895,22 +895,6 @@ def detect_sign_quad(
     candidates.sort(key=lambda x: x[0], reverse=True)
     best_sc, best_q = candidates[0]
 
-    method_names = ["border", "adaptive", "hough", "edge_contrast"]
-    all_qs = [q_border, q_adaptive, q_hough, q_edge]
-    import sys
-    for i, (sc, q) in enumerate(candidates):
-        name = "unknown"
-        for j, qq in enumerate(all_qs):
-            if qq is q:
-                name = method_names[j]
-                break
-        print(f"[quad_debug] method={name} score={sc:.4f} "
-              f"TL=({q[0]['x']:.0f},{q[0]['y']:.0f}) "
-              f"TR=({q[1]['x']:.0f},{q[1]['y']:.0f}) "
-              f"BR=({q[2]['x']:.0f},{q[2]['y']:.0f}) "
-              f"BL=({q[3]['x']:.0f},{q[3]['y']:.0f})", file=sys.stderr)
-    print(f"[quad_debug] WINNER={best_sc:.4f}", file=sys.stderr)
-
     if best_sc < 0.02:
         return None
 
