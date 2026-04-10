@@ -130,32 +130,29 @@ def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
     # is a dense filled rectangle (ratio ≈ 0.8–1.0) whereas sky or scattered
     # background blue has a low ratio.  This discriminates sky from sign even
     # when sky pixels survive the colour threshold.
-    best = None
     best_score = -1.0
+    best_cnt = None
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < min_area:
             continue
-        x, y, w, h = cv2.boundingRect(cnt)
-        bbox_area = w * h
+        bx, by, bw, bh = cv2.boundingRect(cnt)
+        bbox_area = bw * bh
         fill_ratio = area / bbox_area if bbox_area > 0 else 0.0
-        # Score = fill_ratio so the most solid/rectangular region wins
+        # Pick the most solid/rectangular region (sign >> scattered sky)
         if fill_ratio > best_score:
             best_score = fill_ratio
-            best = (x, y, w, h)
+            best_cnt = cnt
 
-    if best is None:
+    if best_cnt is None:
         return None
 
-    x, y, w, h = best
-    # Use the axis-aligned bounding rectangle so the 4 corners are always
-    # parallel with the sign's horizontal/vertical edges.
-    return [
-        {"x": float(x),     "y": float(y)},      # TL
-        {"x": float(x + w), "y": float(y)},      # TR
-        {"x": float(x + w), "y": float(y + h)},  # BR
-        {"x": float(x),     "y": float(y + h)},  # BL
-    ]
+    # Use the four extreme hull points (min/max of x+y and x-y) to get the
+    # true perspective corners of the sign as it appears in the photo.
+    # This correctly captures any trapezoidal shape from camera angle while
+    # remaining much more stable than approxPolyDP on complex contours.
+    hull_pts = cv2.convexHull(best_cnt).reshape(-1, 2).astype(np.float32)
+    return _four_extreme_hull_points(hull_pts)
 
 
 def simplify_polygon_to_quad(points: list[dict]) -> list[dict] | None:

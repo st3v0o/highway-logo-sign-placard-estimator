@@ -86,18 +86,7 @@ def draw_proposed_placements(
     img_h, img_w = img.shape[:2]
 
     for region in per_region:
-        # Draw the detected perspective quad (4-corner approximation) in yellow
-        detected_quad = region.get("detected_quad")
-        if detected_quad and region.get("used_perspective"):
-            quad_pts = np.array(
-                [[int(round(p["x"])), int(round(p["y"]))] for p in detected_quad],
-                dtype=np.int32,
-            )
-            cv2.polylines(img, [quad_pts], isClosed=True,
-                          color=COLOR_PERSP_QUAD, thickness=max(thickness, 4))
-            # Mark each corner with a filled circle
-            for pt in quad_pts:
-                cv2.circle(img, tuple(pt), 10, COLOR_PERSP_QUAD, -1)
+        # (sign quad is now drawn at the top level in render_annotated_image)
 
         if region.get("used_perspective") and region.get("quad_placements"):
             # Draw perspective-corrected quadrilaterals
@@ -190,6 +179,25 @@ def draw_grid_lines(
     return img
 
 
+def draw_sign_quad(
+    img: np.ndarray,
+    sign_quad: list[dict],
+) -> np.ndarray:
+    """
+    Draw the detected sign boundary quad (4 corners) in yellow.
+    Always drawn when perspective mode is on, regardless of whether any
+    placard placements fit inside it.
+    """
+    quad_pts = np.array(
+        [[int(round(p["x"])), int(round(p["y"]))] for p in sign_quad],
+        dtype=np.int32,
+    )
+    cv2.polylines(img, [quad_pts], isClosed=True, color=COLOR_PERSP_QUAD, thickness=4)
+    for pt in quad_pts:
+        cv2.circle(img, tuple(pt), 10, COLOR_PERSP_QUAD, -1)
+    return img
+
+
 def render_annotated_image(
     pil_image: Image.Image,
     placard_predictions: list[dict],
@@ -197,12 +205,13 @@ def render_annotated_image(
     per_region: list[dict],
     min_confidence: float = 0.0,
     grid: dict | None = None,
+    sign_quad: list[dict] | None = None,
 ) -> Image.Image:
     """
     Compose all overlays onto the image and return a PIL Image.
 
-    Drawing order: grid lines → empty regions → existing placards → proposed placements
-    so that proposals always appear on top.
+    Drawing order: grid lines → sign quad → empty regions → existing placards
+    → proposed placements, so proposals always appear on top.
     """
     img_rgb = np.array(pil_image.convert("RGB"))
     img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
@@ -218,6 +227,11 @@ def render_annotated_image(
             dst_w=grid.get("dst_w"),
             dst_h=grid.get("dst_h"),
         )
+
+    # Draw the detected sign quad unconditionally — visible even when no
+    # placards fit (e.g. large placard scale) so the user can verify alignment.
+    if sign_quad:
+        img = draw_sign_quad(img, sign_quad)
 
     img = draw_empty_regions(img, empty_space_predictions, min_confidence)
     img = draw_placards(img, placard_predictions, min_confidence)

@@ -366,6 +366,7 @@ if "last_placard_preds" in st.session_state:
         per_region=results["per_region"],
         min_confidence=0.0,
         grid=results.get("grid"),
+        sign_quad=results.get("sign_quad"),
     )
 
     # -------------------------------------------------------------------------
