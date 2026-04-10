@@ -254,9 +254,12 @@ uploaded_file = st.file_uploader(
 if uploaded_file is not None:
     with st.expander("🔍 Sign Outline Debug (no API calls needed)", expanded=False):
         st.caption(
-            "Adjust the sliders below to tune the sign boundary detection. "
-            "This runs instantly on your uploaded image — no Roboflow call required. "
-            "Once the yellow box looks right, those values will guide the full inference run."
+            "Preview the sign boundary on your image instantly — no API call needed. "
+            "This panel uses colour-only detection on the full image. "
+            "**After you run inference**, the full run uses a smarter method: it crops "
+            "tightly around the detected placards/empty regions first, then finds the "
+            "sign edges inside that crop (sky and trees are outside, so they can't interfere). "
+            "The sliders here let you verify the sign is detectable before committing to an API call."
         )
         col_s, col_v, col_k, col_o = st.columns(4)
         with col_s:
