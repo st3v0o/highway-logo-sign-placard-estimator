@@ -140,37 +140,50 @@ def detect_sign_quad_from_blue(
     # to sky blobs), then close (fill internal holes / text gaps in the sign body).
     k_open  = np.ones((open_k, open_k), np.uint8)
     k_close = np.ones((25, 25),         np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
+    mask_open_only = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k_open)
+    mask = cv2.morphologyEx(mask_open_only, cv2.MORPH_CLOSE, k_close)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
 
-    img_area = img_work.shape[0] * img_work.shape[1]
+    img_h_w, img_w_w = img_work.shape[:2]
+    img_area = img_h_w * img_w_w
     min_area = 0.05 * img_area
 
-    # Among large-enough candidates, prefer the one with the largest area whose
-    # centroid is in the lower portion of the image.  Highway logo sign main
-    # panels are always below header panels (EXIT / 771B), so weighting by
-    # centroid_y picks the main panel over a smaller header even when they have
-    # similar fill ratios.
-    best_score = -1.0
-    best_cnt = None
+    # Collect all large-enough contours with their centroids
+    candidates = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < min_area:
             continue
         M = cv2.moments(cnt)
-        cy_frac = (M["m01"] / M["m00"]) / img_work.shape[0] if M["m00"] > 0 else 0.5
-        # Score = area × (1 + centroid_y_fraction) — larger area AND lower position wins
-        score = area * (1.0 + cy_frac)
-        if score > best_score:
-            best_score = score
-            best_cnt = cnt
+        if M["m00"] == 0:
+            continue
+        cy = M["m01"] / M["m00"]
+        candidates.append((area, cy, cnt))
 
-    if best_cnt is None:
+    if not candidates:
         return None
+
+    # Sort largest-first; the biggest contour anchors the sign cluster.
+    candidates.sort(key=lambda x: -x[0])
+    anchor_cy = candidates[0][1]
+
+    # Group contours whose centroid_y is within 25 % of the working image height
+    # from the anchor.  Sign panels in the same horizontal row share almost the
+    # same centroid_y (e.g. three side-by-side RaceWay panels).  A header panel
+    # sitting well above the main sign (like EXIT 771B) is excluded.
+    cluster = [cnt for area, cy, cnt in candidates
+               if abs(cy - anchor_cy) < 0.25 * img_h_w]
+
+    if len(cluster) == 1:
+        best_cnt = cluster[0]
+    else:
+        # Merge all co-planar panels into one combined convex hull so Hough
+        # lines see the full sign width, not just one panel's edges.
+        all_pts = np.vstack([c.reshape(-1, 2) for c in cluster])
+        best_cnt = cv2.convexHull(all_pts)
 
     # ── Per-edge Hough line detection ────────────────────────────────────────
     # Detect each edge independently so that a header panel (EXIT sign) attached
@@ -230,30 +243,102 @@ def detect_sign_quad_from_blue(
             k_h = max(1, len(h_segs) // 4)
             k_v = max(1, len(v_segs) // 4)
 
-            # BOTTOM edge: lowest horizontal segments (standard)
-            bot_segs = h_sorted[-k_h:]
+            def _band_pick(segs, lo, hi, sort_key, take_top):
+                """Filter segs to [lo,hi] band, return top or bottom quartile."""
+                band = [s for s in segs if lo <= sort_key(s) <= hi]
+                if not band:
+                    return None
+                band_sorted = sorted(band, key=sort_key)
+                k = max(1, len(band) // 4)
+                return band_sorted[:k] if take_top else band_sorted[-k:]
 
-            # TOP edge: horizontal segments in the 15–60 % band of the
-            # contour bounding box.  Segments above 15 % (EXIT panel top)
-            # are excluded; segments below 60 % belong to the sign body.
-            top_band_lo = by + 0.15 * bh
-            top_band_hi = by + 0.60 * bh
-            h_top_candidates = [
-                s for s in h_sorted
-                if top_band_lo <= (s[1] + s[3]) / 2 <= top_band_hi
-            ]
-            if h_top_candidates:
-                # Take the topmost segments within the band
-                k_top = max(1, len(h_top_candidates) // 4)
-                top_segs = sorted(h_top_candidates,
-                                  key=lambda s: (s[1] + s[3]) / 2)[:k_top]
-            else:
-                # Fallback: topmost 25 % overall
-                top_segs = h_sorted[:k_h]
+            mid_y = lambda s: (s[1] + s[3]) / 2  # noqa: E731
+            mid_x = lambda s: (s[0] + s[2]) / 2  # noqa: E731
 
-            # LEFT / RIGHT edges: standard extreme-quartile vertical segments
-            left_segs  = v_sorted[:k_v]
-            right_segs = v_sorted[-k_v:]
+            # TOP: horizontal segs in the 15–60 % vertical band of the bbox.
+            # This skips the EXIT/GAS header (< 15 %) while staying above the
+            # midline so we find the main panel's top, not its bottom.
+            top_segs = _band_pick(h_sorted,
+                                   by + 0.15 * bh, by + 0.60 * bh,
+                                   mid_y, take_top=True)
+            if top_segs is None:
+                top_segs = h_sorted[:k_h]          # fallback: topmost overall
+
+            # BOTTOM: use a density-minimum scan on the blue mask to locate the
+            # sign panel's actual bottom edge.
+            #
+            # Background: morphological close merges sign panels with any stray
+            # blue below the sign (mounting hardware, reflections) into one blob.
+            # The Hough boundary then lies at the stray blue's lower edge, not
+            # the sign panel's bottom.
+            #
+            # Solution: scan column-slice of the blue mask row-by-row between
+            # 50 % and 92 % of bbox height.  The sign panel bottom is the row
+            # of minimum blue density in that scan (the thin gap between sign
+            # and below-sign blue).  If no clear gap exists, fall back to Hough.
+            x_lo = max(0, bx)
+            x_hi = min(mask.shape[1], bx + bw)
+            # Start at 70 % of bbox height so sign logos / text (which live in
+            # the upper-to-mid sign body and create false density minima) are
+            # skipped.  The actual panel bottom and any below-sign gap always
+            # live in the lower 30 % of the sign panel range.
+            scan_lo = by + int(0.70 * bh)
+            scan_hi = by + int(0.92 * bh)
+            scan_lo = max(0, min(scan_lo, mask.shape[0] - 1))
+            scan_hi = max(0, min(scan_hi, mask.shape[0] - 1))
+
+            # Compute Hough-based bottom first
+            hough_bot = _band_pick(h_sorted,
+                                    by + 0.55 * bh, by + 0.98 * bh,
+                                    mid_y, take_top=False)
+            if hough_bot is None:
+                hough_bot = h_sorted[-k_h:]
+
+            # Check if Hough bottom is dragged to the very edge of the bbox.
+            # If so, the closed mask has merged the sign with below-sign blue,
+            # so use a density-minimum scan on the open-only mask to find the
+            # real panel bottom.  Otherwise the Hough result is reliable.
+            hough_bot_y = max(mid_y(s) for s in hough_bot) if hough_bot else 0
+            use_density_scan = (hough_bot_y > by + 0.90 * bh)
+
+            bot_segs = None
+            if use_density_scan and x_hi > x_lo and scan_hi > scan_lo:
+                col_width = x_hi - x_lo
+                densities = [
+                    int(mask_open_only[row, x_lo:x_hi].sum()) / 255 / col_width
+                    for row in range(scan_lo, scan_hi + 1)
+                ]
+                peak_d = max(densities) if densities else 0.0
+                min_d  = min(densities) if densities else 0.0
+                if peak_d > 0 and min_d < 0.82 * peak_d:
+                    min_idx = int(np.argmin(densities))
+                    # Require the density to bounce back AFTER the minimum —
+                    # sign→gap→below-sign-blue pattern.  If the minimum is at
+                    # the end of the scan (just the sign face tapering off), it
+                    # is not a real below-sign gap and should be ignored.
+                    if min_idx < len(densities) - 3:
+                        recovery = float(np.mean(densities[min_idx+1:min_idx+4]))
+                        if recovery > min_d * 1.10:   # 10 % bounce-back
+                            gap_y = scan_lo + min_idx
+                            bot_segs = [(x_lo, gap_y, x_hi, gap_y)]
+
+            if bot_segs is None:
+                bot_segs = hough_bot
+
+            # LEFT: vertical segs in the leftmost 35 % horizontal band.
+            # Only the actual left edge of the sign lives here.
+            left_segs = _band_pick(v_sorted,
+                                    bx, bx + 0.35 * bw,
+                                    mid_x, take_top=True)
+            if left_segs is None:
+                left_segs = v_sorted[:k_v]
+
+            # RIGHT: vertical segs in the rightmost 35 % horizontal band.
+            right_segs = _band_pick(v_sorted,
+                                     bx + 0.65 * bw, bx + bw,
+                                     mid_x, take_top=False)
+            if right_segs is None:
+                right_segs = v_sorted[-k_v:]
 
             # Fit one line per edge and intersect opposite pairs
             def fit_abc_local(s_list):
@@ -297,11 +382,23 @@ def detect_sign_quad_from_blue(
                     [tl[0], tl[1]], [tr[0], tr[1]],
                     [br[0], br[1]], [bl[0], bl[1]],
                 ], dtype=np.float32)
-                # Sanity: reject if any corner is implausibly far off
+                # Sanity 1: reject implausibly huge values (near-parallel lines)
                 if any(abs(p[0]) > 1e4 or abs(p[1]) > 1e4 for p in pts_arr):
                     quad = _minAreaRect_fallback()
                 else:
-                    quad = _four_extreme_hull_points(pts_arr)
+                    # Sanity 2: all corners must lie within the contour bounding
+                    # box plus a 12 % margin.  Line extrapolation outside the
+                    # segment range can push intersections well beyond the sign body.
+                    mx, my = 0.12 * bw, 0.12 * bh
+                    inside = all(
+                        bx - mx <= p[0] <= bx + bw + mx and
+                        by - my <= p[1] <= by + bh + my
+                        for p in pts_arr
+                    )
+                    if inside:
+                        quad = _four_extreme_hull_points(pts_arr)
+                    else:
+                        quad = _minAreaRect_fallback()
 
     if quad is None:
         return None
