@@ -218,6 +218,106 @@ def _to_jpeg_bytes(img, quality: int = 82) -> bytes:
     return buf.getvalue()
 
 
+def _current_fitting_params() -> dict:
+    """Snapshot of all sidebar fitting parameters that affect placement count."""
+    return {
+        "placard_scale":            int(st.session_state.placard_scale),
+        "empty_space_scale":        int(st.session_state.empty_space_scale),
+        "default_placard_w":        int(st.session_state.default_placard_w),
+        "default_placard_h":        int(st.session_state.default_placard_h),
+        "outer_margin":             int(st.session_state.outer_margin),
+        "spacing":                  int(st.session_state.spacing),
+        "min_confidence":           float(st.session_state.min_confidence),
+        "estimate_from_detections": bool(st.session_state.estimate_from_detections),
+    }
+
+
+def _refit_result_item(item: dict, params: dict) -> dict:
+    """
+    Re-run fitting + rendering using cached predictions and image.
+    No API call is made.  Returns an updated copy of the item.
+    """
+    conf = params["min_confidence"]
+    placard_preds = [p for p in item["placard_resp"].get("predictions", [])
+                     if p.get("confidence", 0) >= conf]
+    empty_preds   = [p for p in item["empty_resp"].get("predictions", [])
+                     if p.get("confidence", 0) >= conf]
+
+    pil_image  = Image.open(BytesIO(item["_img_bytes"])).convert("RGB")
+    img_w, img_h = pil_image.size
+    image_bgr  = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+
+    results = estimate_total_capacity(
+        empty_space_predictions=empty_preds,
+        placard_predictions=placard_preds,
+        img_h=img_h,
+        img_w=img_w,
+        default_placard_w=params["default_placard_w"],
+        default_placard_h=params["default_placard_h"],
+        margin=params["outer_margin"],
+        spacing=params["spacing"],
+        min_confidence=0.0,
+        estimate_size_from_detections=params["estimate_from_detections"],
+        placard_scale=params["placard_scale"] / 100.0,
+        empty_space_scale=params["empty_space_scale"] / 100.0,
+        perspective_mode=True,
+        image_bgr=image_bgr,
+        grid_mode=True,
+    )
+
+    annotated_rgb = render_annotated_image(
+        pil_image=pil_image,
+        placard_predictions=placard_preds,
+        empty_space_predictions=empty_preds,
+        per_region=results["per_region"],
+        min_confidence=0.0,
+        grid=results.get("grid"),
+        sign_quad=results.get("sign_quad"),
+        draw_sign_grid=True,
+    )
+    annotated_bytes = _to_jpeg_bytes(annotated_rgb)
+
+    sign_quad = results.get("sign_quad")
+    if sign_quad:
+        quad_bgr     = draw_sign_quad(image_bgr.copy(), sign_quad)
+        quad_bytes   = _to_jpeg_bytes(cv2.cvtColor(quad_bgr, cv2.COLOR_BGR2RGB))
+        quad_corners = ", ".join(f"({p['x']:.0f}, {p['y']:.0f})" for p in sign_quad)
+    else:
+        quad_bytes   = None
+        quad_corners = None
+
+    region_rows = [
+        {
+            "Region": f"Region {r['region_index'] + 1}",
+            "Placards fit": r["count"],
+            "Mode": (
+                "perspective" if r.get("used_perspective")
+                else ("polygon" if r.get("used_polygon") else "bbox")
+            ),
+        }
+        for r in results["per_region"]
+    ]
+
+    return {
+        **item,
+        "annotated_bytes": annotated_bytes,
+        "quad_bytes":      quad_bytes,
+        "quad_corners":    quad_corners,
+        "total_fit":       results["total_fit"],
+        "placard_w":       results["placard_w"],
+        "placard_h":       results["placard_h"],
+        "n_placards_det":  len(placard_preds),
+        "n_empty_det":     len(empty_preds),
+        "n_regions_fit":   sum(1 for r in results["per_region"] if r["count"] > 0),
+        "mode_label": (
+            "Perspective" if results["used_perspective_mode"]
+            else ("Polygon" if results["used_polygon_mode"] else "Bbox fallback")
+        ),
+        "region_rows":     region_rows,
+        "_fitting_params": params,
+    }
+
+
 def _run_inference_on_image(pil_image: Image.Image, sign_id: str) -> dict:
     """
     Run the full inference + rendering pipeline on a single PIL image.
@@ -228,6 +328,8 @@ def _run_inference_on_image(pil_image: Image.Image, sign_id: str) -> dict:
     # Resize before heavy processing to keep memory bounded
     pil_image = _resize_for_display(pil_image)
     img_w, img_h = pil_image.size
+    # Cache the resized image bytes for live re-fitting without a new API call
+    img_bytes = _to_jpeg_bytes(pil_image)
 
     if mock_mode:
         placard_resp = MOCK_PLACARD_RESPONSE
@@ -335,6 +437,9 @@ def _run_inference_on_image(pil_image: Image.Image, sign_id: str) -> dict:
         "placard_resp":    placard_resp,
         "empty_resp":      empty_resp,
         "mock_mode":       used_mock,
+        # Cached inputs for live re-fitting (no API call needed on slider change)
+        "_img_bytes":      img_bytes,
+        "_fitting_params": _current_fitting_params(),
     }
 
 
@@ -505,6 +610,19 @@ with tab_upload:
         st.session_state["results_list"] = results_list
 
     if st.session_state.get("results_list"):
+        # Live re-fit: if any sidebar fitting param changed since the last run,
+        # re-run estimate_total_capacity + render for each cached item without
+        # calling the Roboflow API again.
+        current_params = _current_fitting_params()
+        results_list_cached = st.session_state["results_list"]
+        needs_save = False
+        for i, item in enumerate(results_list_cached):
+            if item.get("_fitting_params") != current_params:
+                with st.spinner(f"Updating {item['sign_id']}…"):
+                    results_list_cached[i] = _refit_result_item(item, current_params)
+                needs_save = True
+        if needs_save:
+            st.session_state["results_list"] = results_list_cached
         _render_results(st.session_state["results_list"])
     elif not uploaded_files and not st.session_state.get("results_list"):
         st.info("Upload one or more images to get started.")
