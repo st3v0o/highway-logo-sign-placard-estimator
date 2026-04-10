@@ -490,7 +490,7 @@ with tab_excel:
     st.subheader("Batch Processing from Excel or CSV")
     st.caption(
         "Upload a spreadsheet with a sign identifier column and an image URL column. "
-        "The app will download each image and run the selected processing mode."
+        "The app processes one image per step so it never times out on large batches."
     )
 
     excel_file = st.file_uploader(
@@ -499,7 +499,13 @@ with tab_excel:
         key="excel_uploader",
     )
 
-    if excel_file is not None:
+    # -----------------------------------------------------------------------
+    # File parsing + column mapping (only shown when NOT actively processing)
+    # -----------------------------------------------------------------------
+
+    batch_active = st.session_state.get("batch_active", False)
+
+    if excel_file is not None and not batch_active:
         try:
             if excel_file.name.lower().endswith(".csv"):
                 df = pd.read_csv(excel_file)
@@ -545,7 +551,7 @@ with tab_excel:
             process_batch = st.button("Process Batch", type="primary", use_container_width=True)
 
             if process_batch:
-                do_inference = batch_mode.startswith("Run Inference")
+                do_inference = st.session_state["batch_mode"].startswith("Run Inference")
 
                 if do_inference and not mock_mode:
                     missing = []
@@ -556,39 +562,83 @@ with tab_excel:
                         st.error(f"Please fill in: {', '.join(missing)}")
                         st.stop()
 
-                batch_results    = []
-                batch_grid_items = []
-                rows  = df[[sign_id_col, url_col]].dropna().values.tolist()
-                total = len(rows)
-                progress = st.progress(0, text="Starting batch…")
+                rows = df[[sign_id_col, url_col]].dropna().values.tolist()
+                rows = [(str(r[0]).strip(), str(r[1]).strip()) for r in rows]
 
-                for idx, (sign_id, url) in enumerate(rows):
-                    sign_id = str(sign_id).strip()
-                    url     = str(url).strip()
-                    progress.progress(idx / total, text=f"[{idx + 1}/{total}] {sign_id}…")
+                # Initialise state for one-row-per-rerun processing
+                st.session_state["batch_rows"]         = rows
+                st.session_state["batch_idx"]          = 0
+                st.session_state["batch_do_inference"] = do_inference
+                st.session_state["batch_results_list"] = []
+                st.session_state["batch_grid_items"]   = []
+                st.session_state["batch_errors"]       = []
+                st.session_state["batch_active"]       = True
+                st.rerun()
 
-                    # Download image
-                    try:
-                        resp = requests.get(url, timeout=20)
-                        resp.raise_for_status()
-                        pil_image = Image.open(BytesIO(resp.content)).convert("RGB")
-                    except Exception as exc:
-                        st.warning(f"**{sign_id}**: could not download image — {exc}")
-                        continue
+    # -----------------------------------------------------------------------
+    # One-row-per-rerun processing loop
+    # -----------------------------------------------------------------------
 
-                    if do_inference:
-                        try:
-                            batch_results.append(_run_inference_on_image(pil_image, sign_id))
-                        except Exception as exc:
-                            st.warning(f"**{sign_id}**: inference failed — {exc}")
-                    else:
-                        batch_grid_items.append(_run_grid_on_image(pil_image, sign_id))
+    if st.session_state.get("batch_active"):
+        rows         = st.session_state["batch_rows"]
+        idx          = st.session_state["batch_idx"]
+        total        = len(rows)
+        do_inference = st.session_state["batch_do_inference"]
 
-                progress.progress(1.0, text=f"Done — {total} sign(s) processed.")
-                st.session_state["batch_results_list"]  = batch_results
-                st.session_state["batch_grid_items"]    = batch_grid_items
+        # Progress UI
+        frac = idx / total if total else 1.0
+        st.progress(frac, text=f"Processing sign {idx + 1} of {total}…")
+        st.caption(f"**{rows[idx][0]}** — {rows[idx][1]}" if idx < total else "")
 
-    # Display batch results
+        # Stop button
+        if st.button("Stop Batch", key="stop_batch"):
+            st.session_state["batch_active"] = False
+            st.rerun()
+
+        # Process the current row
+        if idx < total:
+            sign_id, url = rows[idx]
+            try:
+                resp = requests.get(url, timeout=25)
+                resp.raise_for_status()
+                pil_image = Image.open(BytesIO(resp.content)).convert("RGB")
+
+                if do_inference:
+                    item = _run_inference_on_image(pil_image, sign_id)
+                    st.session_state["batch_results_list"].append(item)
+                else:
+                    item = _run_grid_on_image(pil_image, sign_id)
+                    st.session_state["batch_grid_items"].append(item)
+
+            except Exception as exc:
+                st.session_state["batch_errors"].append(f"**{sign_id}**: {exc}")
+
+            # Advance to next row and immediately rerun
+            st.session_state["batch_idx"] = idx + 1
+
+            if st.session_state["batch_idx"] >= total:
+                st.session_state["batch_active"] = False
+
+            st.rerun()
+
+    # -----------------------------------------------------------------------
+    # Completion banner + any per-row errors
+    # -----------------------------------------------------------------------
+
+    if (not st.session_state.get("batch_active")
+            and (st.session_state.get("batch_results_list")
+                 or st.session_state.get("batch_grid_items"))):
+        done_count = (len(st.session_state.get("batch_results_list", [])) +
+                      len(st.session_state.get("batch_grid_items", [])))
+        st.success(f"Batch complete — {done_count} sign(s) processed successfully.")
+
+    for err in st.session_state.get("batch_errors", []):
+        st.warning(err)
+
+    # -----------------------------------------------------------------------
+    # Display accumulated results
+    # -----------------------------------------------------------------------
+
     if st.session_state.get("batch_grid_items"):
         st.divider()
         st.subheader("Batch Grid Results")
