@@ -197,12 +197,36 @@ with st.sidebar:
 # (Defined after the sidebar so sidebar variables are in module scope)
 # ---------------------------------------------------------------------------
 
+_MAX_DISPLAY_PX = 1200   # cap for any image stored in session state
+
+
+def _resize_for_display(pil_image: Image.Image) -> Image.Image:
+    """Resize to at most _MAX_DISPLAY_PX on the long edge, preserving aspect ratio."""
+    w, h = pil_image.size
+    if max(w, h) > _MAX_DISPLAY_PX:
+        ratio = _MAX_DISPLAY_PX / max(w, h)
+        pil_image = pil_image.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+    return pil_image
+
+
+def _to_jpeg_bytes(img, quality: int = 82) -> bytes:
+    """Convert a PIL Image or numpy RGB array to JPEG bytes."""
+    if isinstance(img, np.ndarray):
+        img = Image.fromarray(img.astype(np.uint8))
+    buf = BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
 def _run_inference_on_image(pil_image: Image.Image, sign_id: str) -> dict:
     """
-    Run the full inference pipeline on a single PIL image.
-    Raises on API errors so callers can catch and show a warning.
-    Returns a result dict compatible with _render_results().
+    Run the full inference + rendering pipeline on a single PIL image.
+    All expensive CV work happens here once; the returned dict contains only
+    pre-rendered JPEG bytes and scalar metrics so _render_results() is
+    just a display call with no recomputation.
     """
+    # Resize before heavy processing to keep memory bounded
+    pil_image = _resize_for_display(pil_image)
     img_w, img_h = pil_image.size
 
     if mock_mode:
@@ -232,28 +256,94 @@ def _run_inference_on_image(pil_image: Image.Image, sign_id: str) -> dict:
     placard_preds = [p for p in placard_resp.get("predictions", []) if p.get("confidence", 0) >= conf]
     empty_preds   = [p for p in empty_resp.get("predictions",   []) if p.get("confidence", 0) >= conf]
 
-    buf = BytesIO()
-    pil_image.save(buf, format="PNG")
+    image_bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+
+    # Run fitting once
+    results = estimate_total_capacity(
+        empty_space_predictions=empty_preds,
+        placard_predictions=placard_preds,
+        img_h=img_h,
+        img_w=img_w,
+        default_placard_w=int(default_placard_w),
+        default_placard_h=int(default_placard_h),
+        margin=int(outer_margin),
+        spacing=int(spacing),
+        min_confidence=0.0,
+        estimate_size_from_detections=estimate_from_detections,
+        placard_scale=placard_scale / 100.0,
+        empty_space_scale=empty_space_scale / 100.0,
+        perspective_mode=True,
+        image_bgr=image_bgr,
+        grid_mode=True,
+    )
+
+    # Render annotated image once → store as JPEG
+    annotated_rgb = render_annotated_image(
+        pil_image=pil_image,
+        placard_predictions=placard_preds,
+        empty_space_predictions=empty_preds,
+        per_region=results["per_region"],
+        min_confidence=0.0,
+        grid=results.get("grid"),
+        sign_quad=results.get("sign_quad"),
+        draw_sign_grid=True,
+    )
+    annotated_bytes = _to_jpeg_bytes(annotated_rgb)
+
+    # Render sign-outline preview once → store as JPEG
+    sign_quad = results.get("sign_quad")
+    if sign_quad:
+        quad_bgr     = draw_sign_quad(image_bgr.copy(), sign_quad)
+        quad_bytes   = _to_jpeg_bytes(cv2.cvtColor(quad_bgr, cv2.COLOR_BGR2RGB))
+        quad_corners = ", ".join(f"({p['x']:.0f}, {p['y']:.0f})" for p in sign_quad)
+    else:
+        quad_bytes   = None
+        quad_corners = None
+
+    # Build per-region table rows (scalars only — no arrays)
+    region_rows = [
+        {
+            "Region": f"Region {r['region_index'] + 1}",
+            "Placards fit": r["count"],
+            "Mode": (
+                "perspective" if r.get("used_perspective")
+                else ("polygon" if r.get("used_polygon") else "bbox")
+            ),
+        }
+        for r in results["per_region"]
+    ]
 
     return {
-        "sign_id":      sign_id,
-        "filename":     sign_id,
-        "img_bytes":    buf.getvalue(),
-        "img_w":        img_w,
-        "img_h":        img_h,
-        "placard_preds": placard_preds,
-        "empty_preds":   empty_preds,
-        "placard_resp":  placard_resp,
-        "empty_resp":    empty_resp,
-        "mock_mode":     used_mock,
+        "sign_id":         sign_id,
+        # Pre-rendered images (JPEG bytes — cheap to store and display)
+        "annotated_bytes": annotated_bytes,
+        "quad_bytes":      quad_bytes,
+        "quad_corners":    quad_corners,
+        # Scalar metrics
+        "total_fit":       results["total_fit"],
+        "placard_w":       results["placard_w"],
+        "placard_h":       results["placard_h"],
+        "n_placards_det":  len(placard_preds),
+        "n_empty_det":     len(empty_preds),
+        "n_regions_fit":   sum(1 for r in results["per_region"] if r["count"] > 0),
+        "mode_label": (
+            "Perspective" if results["used_perspective_mode"]
+            else ("Polygon" if results["used_polygon_mode"] else "Bbox fallback")
+        ),
+        "region_rows":     region_rows,
+        # Raw JSON (kept for inspection, but lightweight)
+        "placard_resp":    placard_resp,
+        "empty_resp":      empty_resp,
+        "mock_mode":       used_mock,
     }
 
 
 def _run_grid_on_image(pil_image: Image.Image, sign_id: str) -> dict:
     """
     Run grid-only (no API) sign boundary detection on a single PIL image.
-    Returns a display-ready dict for the grid results display section.
+    The visualisation is pre-rendered to JPEG bytes so reruns are cheap.
     """
+    pil_image = _resize_for_display(pil_image)
     bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
     quad = detect_sign_quad_from_blue(bgr)
     vis_bgr = bgr.copy()
@@ -266,66 +356,27 @@ def _run_grid_on_image(pil_image: Image.Image, sign_id: str) -> dict:
         status = "Corners: " + ", ".join(f"({p['x']:.0f},{p['y']:.0f})" for p in quad)
     else:
         status = None
+    vis_rgb   = cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB)
+    vis_bytes = _to_jpeg_bytes(vis_rgb)
     return {
-        "sign_id":  sign_id,
-        "filename": sign_id,
-        "vis":      cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB),
-        "quad":     quad,
-        "status":   status,
+        "sign_id":   sign_id,
+        "vis_bytes": vis_bytes,   # JPEG bytes — no large arrays in session state
+        "has_quad":  quad is not None,
+        "status":    status,
     }
 
 
 def _render_results(results_list: list) -> None:
     """
-    Render a list of inference result dicts (from _run_inference_on_image).
-    Used by both the Direct Upload tab and the Excel Batch tab.
+    Display pre-rendered inference results.
+    All images are stored as JPEG bytes — no CV recomputation on each Streamlit rerun.
     """
     for item in results_list:
-        pil_image            = Image.open(BytesIO(item["img_bytes"]))
-        img_w                = item["img_w"]
-        img_h                = item["img_h"]
-        placard_preds_filtered = item["placard_preds"]
-        empty_preds_filtered   = item["empty_preds"]
-        placard_resp         = item["placard_resp"]
-        empty_resp           = item["empty_resp"]
-        label                = item.get("sign_id") or item.get("filename", "")
-
         st.divider()
-        st.subheader(label)
+        st.subheader(item["sign_id"])
 
         if item.get("mock_mode"):
             st.info("Mock Mode is ON — using sample predictions (no API call made).")
-
-        image_bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-
-        results = estimate_total_capacity(
-            empty_space_predictions=empty_preds_filtered,
-            placard_predictions=placard_preds_filtered,
-            img_h=img_h,
-            img_w=img_w,
-            default_placard_w=int(default_placard_w),
-            default_placard_h=int(default_placard_h),
-            margin=int(outer_margin),
-            spacing=int(spacing),
-            min_confidence=0.0,
-            estimate_size_from_detections=estimate_from_detections,
-            placard_scale=placard_scale / 100.0,
-            empty_space_scale=empty_space_scale / 100.0,
-            perspective_mode=True,
-            image_bgr=image_bgr,
-            grid_mode=True,
-        )
-
-        annotated = render_annotated_image(
-            pil_image=pil_image,
-            placard_predictions=placard_preds_filtered,
-            empty_space_predictions=empty_preds_filtered,
-            per_region=results["per_region"],
-            min_confidence=0.0,
-            grid=results.get("grid"),
-            sign_quad=results.get("sign_quad"),
-            draw_sign_grid=True,
-        )
 
         col_img, col_stats = st.columns([3, 1])
         with col_img:
@@ -334,67 +385,48 @@ def _render_results(results_list: list) -> None:
                 "**Orange** = empty regions   "
                 "**Cyan** = proposed new placements"
             )
-            st.image(annotated, use_container_width=True)
+            st.image(item["annotated_bytes"], use_container_width=True)
 
         with col_stats:
-            n_regions = len([r for r in results["per_region"] if r.get("count", 0) > 0])
+            n = item["n_regions_fit"]
             st.metric(
                 "Estimated New Placard Slots",
-                results["total_fit"],
-                delta=f"across {n_regions} region(s)" if n_regions else None,
+                item["total_fit"],
+                delta=f"across {n} region(s)" if n else None,
                 delta_color="off",
             )
-            st.metric("Placard Width Used (px)", results["placard_w"])
-            st.metric("Placard Height Used (px)", results["placard_h"])
+            st.metric("Placard Width Used (px)",  item["placard_w"])
+            st.metric("Placard Height Used (px)", item["placard_h"])
 
         with st.expander("🔍 Sign Outline Preview"):
-            _quad = results.get("sign_quad")
-            if _quad:
-                _bgr     = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-                _preview = draw_sign_quad(_bgr.copy(), _quad)
-                _preview = cv2.cvtColor(_preview, cv2.COLOR_BGR2RGB)
-                st.image(_preview, use_container_width=True)
-                st.success("Sign boundary corners: " +
-                           ", ".join(f"({p['x']:.0f}, {p['y']:.0f})" for p in _quad))
+            if item["quad_bytes"]:
+                st.image(item["quad_bytes"], use_container_width=True)
+                st.success(f"Sign boundary corners: {item['quad_corners']}")
             else:
-                st.image(np.array(pil_image), use_container_width=True)
                 st.warning("Could not detect a blue sign boundary in this image.")
 
         with st.expander("📊 Debug Details"):
             debug_cols = st.columns(4)
-            debug_cols[0].metric("Placards Detected", len(placard_preds_filtered))
-            debug_cols[1].metric("Empty Regions Detected", len(empty_preds_filtered))
-            debug_cols[2].info(
-                "Perspective mode" if results["used_perspective_mode"]
-                else ("Polygon mode" if results["used_polygon_mode"] else "Bbox fallback")
-            )
-            debug_cols[3].metric("Regions with fits", sum(1 for r in results["per_region"] if r["count"] > 0))
-            if results["per_region"]:
+            debug_cols[0].metric("Placards Detected",    item["n_placards_det"])
+            debug_cols[1].metric("Empty Regions Detected", item["n_empty_det"])
+            debug_cols[2].info(item["mode_label"])
+            debug_cols[3].metric("Regions with fits",    item["n_regions_fit"])
+            if item["region_rows"]:
                 st.write("**Count per empty region:**")
-                st.table([
-                    {
-                        "Region": f"Region {r['region_index'] + 1}",
-                        "Placards fit": r["count"],
-                        "Mode": (
-                            "perspective" if r.get("used_perspective")
-                            else ("polygon" if r.get("used_polygon") else "bbox")
-                        ),
-                    }
-                    for r in results["per_region"]
-                ])
+                st.table(item["region_rows"])
 
         with st.expander("Raw JSON — Placard Model Response"):
-            st.json(placard_resp)
+            st.json(item["placard_resp"])
         with st.expander("Raw JSON — Empty-Space Model Response"):
-            st.json(empty_resp)
+            st.json(item["empty_resp"])
 
 
 def _render_grid_items(grid_items: list) -> None:
-    """Render a list of grid-only result dicts (from _run_grid_on_image)."""
+    """Display pre-rendered grid-only results (JPEG bytes — no recomputation)."""
     for item in grid_items:
-        st.markdown(f"**{item.get('sign_id') or item.get('filename', '')}**")
-        st.image(item["vis"], use_container_width=True)
-        if item["quad"]:
+        st.markdown(f"**{item['sign_id']}**")
+        st.image(item["vis_bytes"], use_container_width=True)
+        if item["has_quad"]:
             st.success(item["status"])
         else:
             st.warning(
