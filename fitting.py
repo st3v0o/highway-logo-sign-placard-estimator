@@ -22,7 +22,6 @@ from geometry import (
     compute_region_homography,
     simplify_polygon_to_quad,
     detect_sign_quad_from_blue,
-    detect_sign_quad_from_detections,
 )
 
 
@@ -527,30 +526,12 @@ def estimate_total_capacity(
     sign_quad: list[dict] | None = None
     sign_homography: tuple | None = None
     # Compute the blue-pixel sign boundary whenever perspective OR grid mode is
-    # active — grid mode needs it to draw the same corner-based grid as the
-    # Generate Grid button.
-    #
-    # detect_sign_quad_from_detections uses the prediction bounding box as an
-    # ROI hint to focus the blue-pixel search.  Only call it in perspective mode
-    # where model predictions are meaningful; for grid-only mode (no inference
-    # ROI to trust) go straight to the full-image blue scan so that mock-mode
-    # predictions (which use a generic small-image coordinate space) cannot
-    # produce a tiny wrong quad that blocks the real detection.
-    print(f"[fitting] grid_mode={grid_mode} perspective_mode={perspective_mode} image_bgr={'yes' if image_bgr is not None else 'None'}")
+    # active.  Always use the full-image blue-pixel scan — identical to what
+    # the Generate Grid button does and tuned specifically for highway signs.
+    # (A previous ROI-guided approach using detection bounding boxes returned
+    # wrong/tiny quads when predictions were tight or used mock coordinates.)
     if (perspective_mode or grid_mode) and image_bgr is not None:
-        if perspective_mode:
-            all_preds = (
-                [p for p in placard_predictions if p.get("confidence", 0) >= min_confidence]
-                + [p for p in empty_space_predictions if p.get("confidence", 0) >= min_confidence]
-            )
-            if all_preds:
-                sign_quad = detect_sign_quad_from_detections(
-                    image_bgr, placard_predictions, empty_space_predictions
-                )
-                print(f"[fitting] detect_sign_quad_from_detections => {sign_quad is not None}")
-        if sign_quad is None:
-            sign_quad = detect_sign_quad_from_blue(image_bgr)
-            print(f"[fitting] detect_sign_quad_from_blue => {sign_quad}")
+        sign_quad = detect_sign_quad_from_blue(image_bgr)
     if perspective_mode and sign_quad is not None:
         H_s, H_s_inv, dst_w_s, dst_h_s = compute_region_homography(sign_quad)
         sign_homography = (H_s, H_s_inv, dst_w_s, dst_h_s)
