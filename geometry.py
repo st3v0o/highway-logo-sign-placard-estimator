@@ -801,17 +801,58 @@ def detect_sign_quad(
     if best_sc < 0.02:
         return None
 
-    # ── Parallelogram TR fix ───────────────────────────────────────────────
-    # EXIT-sign caps in the upper-right corner of highway signs inflate the
-    # detected TR corner upward regardless of which detection method won.
-    # The three lower-corner points (TL, BL, BR) are reliable, so we infer
-    # TR = TL + (BR − BL), the parallelogram rule.  This gives the correct
-    # top-right corner of the *main* sign body without any sky/cap influence.
-    tl_d, tr_d, br_d, bl_d = best_q   # each is {"x": …, "y": …}
-    tr_fixed = {
-        "x": tl_d["x"] + br_d["x"] - bl_d["x"],
-        "y": tl_d["y"] + br_d["y"] - bl_d["y"],
-    }
+    # ── Right-boundary fix via blue-mask scan ─────────────────────────────
+    # EXIT-sign caps sit in the upper-right of the frame.  Every detection
+    # method can pull TR up and right into that cap.  The fix: scan the BLUE
+    # mask in the central y-band of the sign (40 %–80 % of the sign height).
+    # The EXIT cap never appears there, so the rightmost blue column in that
+    # band is the MAIN sign's true right edge.  We then project TL outward
+    # (along the same slope as the bottom edge BL→BR) to that x, giving a
+    # perspective-correct TR without any cap interference.
+    tl_d, tr_d, br_d, bl_d = best_q   # each {"x":…, "y":…}
+
+    sw = ww / w          # scale: original → working coords
+    sb = w  / ww         # scale back: working → original
+    tl_w = np.array([tl_d["x"] * sw, tl_d["y"] * sw])
+    bl_w = np.array([bl_d["x"] * sw, bl_d["y"] * sw])
+    br_w = np.array([br_d["x"] * sw, br_d["y"] * sw])
+
+    sign_h_w = max(bl_w[1] - tl_w[1], 1.0)
+
+    # Scan the central y-band (40 %–80 % of sign height in working space)
+    y_lo = int(np.clip(tl_w[1] + 0.40 * sign_h_w, 0, wh - 1))
+    y_hi = int(np.clip(tl_w[1] + 0.80 * sign_h_w, 0, wh - 1))
+
+    right_cols: list[int] = []
+    for row in range(y_lo, y_hi + 1):
+        nz = np.where(blue_loose[row, :] > 0)[0]
+        if len(nz) > 0:
+            right_cols.append(int(nz[-1]))
+
+    if len(right_cols) >= 5:
+        # 80th-percentile is more robust than max against stray blue pixels
+        right_x_w = float(np.percentile(right_cols, 80))
+
+        # Slope of the sign's perspective: use the bottom edge (BL→BR)
+        bot_dx = br_w[0] - bl_w[0]
+        bot_dy = br_w[1] - bl_w[1]
+
+        # Extrapolate TL rightward along that slope to right_x_w
+        dx_to_right = right_x_w - tl_w[0]
+        if abs(bot_dx) > 1e-3:
+            t = dx_to_right / bot_dx
+            tr_y_w = tl_w[1] + t * bot_dy
+        else:
+            tr_y_w = tl_w[1]
+
+        tr_fixed = {"x": right_x_w * sb, "y": tr_y_w * sb}
+    else:
+        # Fallback: parallelogram rule (rare — sign fills entire frame)
+        tr_fixed = {
+            "x": tl_d["x"] + br_d["x"] - bl_d["x"],
+            "y": tl_d["y"] + br_d["y"] - bl_d["y"],
+        }
+
     return [tl_d, tr_fixed, br_d, bl_d]
 
 
