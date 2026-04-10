@@ -195,6 +195,41 @@ def draw_sign_quad(
     return img
 
 
+def _detect_blue_bounds_flat(flat_bgr: np.ndarray) -> tuple[int, int, int, int]:
+    """
+    Find the bounding box of the sign's blue panel in a perspective-corrected
+    (flat) image.  Uses strict saturation to separate vivid sign-blue from
+    washed-out sky-blue, then falls back to the full image if nothing is found.
+
+    Returns (x1, y1, x2, y2) in flat-image pixel coords.
+    """
+    fh, fw = flat_bgr.shape[:2]
+    hsv = cv2.cvtColor(flat_bgr, cv2.COLOR_BGR2HSV)
+
+    # Strict blue: sign-panel blue (saturation ≥ 80 distinguishes it from sky)
+    blue = cv2.inRange(hsv, np.array([85, 80, 40]), np.array([140, 255, 230]))
+    ker_c = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 20))
+    ker_o = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10))
+    blue = cv2.morphologyEx(blue, cv2.MORPH_CLOSE, ker_c)
+    blue = cv2.morphologyEx(blue, cv2.MORPH_OPEN,  ker_o)
+
+    n, _, stats, _ = cv2.connectedComponentsWithStats(blue)
+    if n < 2:
+        return 0, 0, fw, fh  # fallback: whole flat image
+
+    # Largest non-background component
+    best = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    area_frac = stats[best, cv2.CC_STAT_AREA] / (fw * fh)
+    if area_frac < 0.08:
+        return 0, 0, fw, fh  # tiny blob → fallback
+
+    x1 = int(stats[best, cv2.CC_STAT_LEFT])
+    y1 = int(stats[best, cv2.CC_STAT_TOP])
+    x2 = x1 + int(stats[best, cv2.CC_STAT_WIDTH])
+    y2 = y1 + int(stats[best, cv2.CC_STAT_HEIGHT])
+    return x1, y1, x2, y2
+
+
 def draw_sign_corner_grid(
     img: np.ndarray,
     sign_quad: list[dict],
@@ -203,42 +238,73 @@ def draw_sign_corner_grid(
     alpha: float = 0.45,
 ) -> np.ndarray:
     """
-    Draw a bilinear perspective grid subdividing the sign boundary into
-    cols × rows cells — identical to the Generate Grid visualisation.
+    Draw a perspective-corrected grid over the sign panel.
+
+    Pipeline:
+      1. Warp the sign quad to a flat (head-on) rectangle via
+         cv2.getPerspectiveTransform + cv2.warpPerspective.
+      2. Detect the actual blue-panel bounds in the flat image
+         (strict HSV mask → largest connected component bounding box).
+      3. Draw a simple horizontal/vertical grid in flat space.
+      4. Warp the flat grid overlay back to the original perspective.
+      5. Blend it onto the original image clipped to the sign quad.
 
     sign_quad: [TL, TR, BR, BL] dicts with 'x' and 'y' keys.
     """
-    tl = np.float32([sign_quad[0]["x"], sign_quad[0]["y"]])
-    tr = np.float32([sign_quad[1]["x"], sign_quad[1]["y"]])
-    br = np.float32([sign_quad[2]["x"], sign_quad[2]["y"]])
-    bl = np.float32([sign_quad[3]["x"], sign_quad[3]["y"]])
-
-    # Build a filled polygon mask so grid lines are clipped strictly inside
-    # the sign boundary — corners that stray into sky or trees won't pull
-    # grid lines outside the sign.
     h_img, w_img = img.shape[:2]
-    quad_poly = np.array([tl, tr, br, bl], dtype=np.int32)
-    clip_mask = np.zeros((h_img, w_img), dtype=np.uint8)
-    cv2.fillPoly(clip_mask, [quad_poly], 255)
 
-    overlay = img.copy()
+    src = np.float32([[q["x"], q["y"]] for q in sign_quad])  # TL TR BR BL
+
+    # Flat output size from quad edge lengths (capped for performance)
+    w_top  = float(np.linalg.norm(src[1] - src[0]))
+    w_bot  = float(np.linalg.norm(src[2] - src[3]))
+    h_left = float(np.linalg.norm(src[3] - src[0]))
+    h_right= float(np.linalg.norm(src[2] - src[1]))
+    fw = min(int(max(w_top, w_bot)), 1200)
+    fh = min(int(max(h_left, h_right)), 900)
+    if fw < 20 or fh < 20:
+        return img  # degenerate quad → skip
+
+    dst = np.float32([[0, 0], [fw, 0], [fw, fh], [0, fh]])
+
+    M     = cv2.getPerspectiveTransform(src, dst)
+    M_inv = cv2.getPerspectiveTransform(dst, src)
+
+    # ── Step 1: warp to flat ─────────────────────────────────────────────────
+    flat = cv2.warpPerspective(img, M, (fw, fh))
+
+    # ── Step 2: find actual blue bounds in flat space ────────────────────────
+    x1, y1, x2, y2 = _detect_blue_bounds_flat(flat)
+    gw, gh = x2 - x1, y2 - y1
+    if gw < 10 or gh < 10:
+        x1, y1, x2, y2 = 0, 0, fw, fh
+        gw, gh = fw, fh
+
+    # ── Step 3: draw grid in flat space ──────────────────────────────────────
+    overlay_flat = flat.copy()
     for i in range(cols + 1):
-        t = i / cols
-        cv2.line(overlay,
-                 tuple((tl + t * (tr - tl)).astype(int)),
-                 tuple((bl + t * (br - bl)).astype(int)),
-                 COLOR_GRID, 1, cv2.LINE_AA)
+        x = x1 + int(i * gw / cols)
+        cv2.line(overlay_flat, (x, y1), (x, y2), COLOR_GRID, 2, cv2.LINE_AA)
     for j in range(rows + 1):
-        t = j / rows
-        cv2.line(overlay,
-                 tuple((tl + t * (bl - tl)).astype(int)),
-                 tuple((tr + t * (br - tr)).astype(int)),
-                 COLOR_GRID, 1, cv2.LINE_AA)
+        y = y1 + int(j * gh / rows)
+        cv2.line(overlay_flat, (x1, y), (x2, y), COLOR_GRID, 2, cv2.LINE_AA)
 
-    # Blend inside the quad only; leave pixels outside untouched
-    blended = cv2.addWeighted(overlay, alpha, img, 1.0 - alpha, 0)
+    flat_blended = cv2.addWeighted(overlay_flat, alpha, flat, 1.0 - alpha, 0)
+
+    # ── Step 4: warp flat grid back to original perspective ──────────────────
+    warped = cv2.warpPerspective(flat_blended, M_inv, (w_img, h_img))
+
+    # ── Step 5: blend — only inside the detected blue region (mapped back) ───
+    # Build a mask in flat space for the refined blue region and warp it back.
+    grid_mask_flat = np.zeros((fh, fw), np.uint8)
+    cv2.rectangle(grid_mask_flat, (x1, y1), (x2, y2), 255, -1)
+    grid_mask_orig = cv2.warpPerspective(
+        grid_mask_flat.astype(np.float32), M_inv, (w_img, h_img)
+    )
+    blend_mask = (grid_mask_orig > 0.5).astype(np.uint8)
+
     out = img.copy()
-    out[clip_mask > 0] = blended[clip_mask > 0]
+    out[blend_mask > 0] = warped[blend_mask > 0]
     return out
 
 
