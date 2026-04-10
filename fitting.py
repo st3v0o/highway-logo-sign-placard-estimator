@@ -529,15 +529,23 @@ def estimate_total_capacity(
     # Compute the blue-pixel sign boundary whenever perspective OR grid mode is
     # active — grid mode needs it to draw the same corner-based grid as the
     # Generate Grid button.
+    #
+    # detect_sign_quad_from_detections uses the prediction bounding box as an
+    # ROI hint to focus the blue-pixel search.  Only call it in perspective mode
+    # where model predictions are meaningful; for grid-only mode (no inference
+    # ROI to trust) go straight to the full-image blue scan so that mock-mode
+    # predictions (which use a generic small-image coordinate space) cannot
+    # produce a tiny wrong quad that blocks the real detection.
     if (perspective_mode or grid_mode) and image_bgr is not None:
-        all_preds = (
-            [p for p in placard_predictions if p.get("confidence", 0) >= min_confidence]
-            + [p for p in empty_space_predictions if p.get("confidence", 0) >= min_confidence]
-        )
-        if all_preds:
-            sign_quad = detect_sign_quad_from_detections(
-                image_bgr, placard_predictions, empty_space_predictions
+        if perspective_mode:
+            all_preds = (
+                [p for p in placard_predictions if p.get("confidence", 0) >= min_confidence]
+                + [p for p in empty_space_predictions if p.get("confidence", 0) >= min_confidence]
             )
+            if all_preds:
+                sign_quad = detect_sign_quad_from_detections(
+                    image_bgr, placard_predictions, empty_space_predictions
+                )
         if sign_quad is None:
             sign_quad = detect_sign_quad_from_blue(image_bgr)
     if perspective_mode and sign_quad is not None:
