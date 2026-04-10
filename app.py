@@ -618,6 +618,11 @@ with tab_upload:
         needs_save = False
         for i, item in enumerate(results_list_cached):
             if item.get("_fitting_params") != current_params:
+                if "_img_bytes" not in item:
+                    # Legacy cached result from a pre-update run — cannot
+                    # re-fit without the stored image bytes.  Skip silently;
+                    # the user just needs to re-run inference once.
+                    continue
                 with st.spinner(f"Updating {item['sign_id']}…"):
                     results_list_cached[i] = _refit_result_item(item, current_params)
                 needs_save = True
