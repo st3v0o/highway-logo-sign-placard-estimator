@@ -220,17 +220,24 @@ def detect_sign_quad_from_detections(
 
     det_x1, det_x2 = min(xs), max(xs)
     det_y1, det_y2 = min(ys), max(ys)
-    det_w = max(det_x2 - det_x1, 1)
-    det_h = max(det_y2 - det_y1, 1)
 
-    # Expand outward to include the sign border and header text.
-    # Use more vertical padding upward (header row) than downward (bottom border only).
-    pad_x  = det_w * 0.12
-    pad_yd = det_h * 0.10   # downward — just the bottom border
-    pad_yu = det_h * 0.35   # upward   — header + top border (GAS/FOOD row is usually ~35% from top)
+    # Padding based on IMAGE dimensions, not detection span.
+    #
+    # Detection-relative padding fails when detections already fill most of
+    # the image (e.g. Popeyes sign: det_h ≈ 700 px → 35 % ≈ 245 px upward,
+    # pushing the box far above the sign into the EXIT panel or sky).
+    #
+    # Image-relative padding is constant regardless of how much of the sign
+    # is already covered by detections:
+    #   • 6 % left / right  — sign side border + small margin
+    #   • 10 % upward        — sign header row ("GAS / FOOD / EXIT …")
+    #   • 4 % downward       — sign bottom border only
+    pad_x  = img_w * 0.06
+    pad_yu = img_h * 0.10
+    pad_yd = img_h * 0.04
 
-    q_x1 = max(0.0,     det_x1 - pad_x)
-    q_y1 = max(0.0,     det_y1 - pad_yu)
+    q_x1 = max(0.0,          det_x1 - pad_x)
+    q_y1 = max(0.0,          det_y1 - pad_yu)
     q_x2 = min(float(img_w), det_x2 + pad_x)
     q_y2 = min(float(img_h), det_y2 + pad_yd)
 
