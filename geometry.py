@@ -898,59 +898,7 @@ def detect_sign_quad(
     if best_sc < 0.02:
         return None
 
-    # ── TR / TL post-processing fix ────────────────────────────────────────
-    # Two-part fix for EXIT-cap signs:
-    #
-    # 1. Grounded TL — every detection method can place TL up in the EXIT cap.
-    #    The candidate with the *largest* TL.y is the least contaminated because
-    #    EXIT-cap inflation always pulls TL *upward* (smaller y).
-    #
-    # 2. Right-edge line for TR — the old approach extrapolated TR.y from the
-    #    bottom-edge slope (BL→BR), but top and bottom edges are NOT parallel in
-    #    perspective so that always overshoots into the EXIT cap.
-    #    Instead: fit the sign's right-edge as a line by scanning rightmost blue
-    #    pixels from TL.y downward to BR.y (all below the EXIT cap).  Predict
-    #    TR.x where that line meets TL.y, and set TR.y = TL.y (the horizontal
-    #    approximation is always safe — it cannot extend into the EXIT cap above).
-    _, _, br_d, bl_d = best_q   # BL and BR are reliable from the winner
-
-    # Step 1: grounded TL
-    grounded_tl = max((q[0] for _, q in candidates), key=lambda p: p["y"])
-
-    sw = ww / w          # scale: original → working coords
-    sb = w  / ww         # scale back: working → original
-    tl_w = np.array([grounded_tl["x"] * sw, grounded_tl["y"] * sw])
-    bl_w = np.array([bl_d["x"] * sw, bl_d["y"] * sw])
-    br_w = np.array([br_d["x"] * sw, br_d["y"] * sw])
-
-    # Step 2: fit the sign's right edge from TL level down to BR level.
-    # This band is always below the EXIT cap (grounded TL ensures TL.y > cap),
-    # so the rightmost blue pixels faithfully trace the sign's right boundary.
-    y_re_lo = int(np.clip(tl_w[1], 0, wh - 1))
-    y_re_hi = int(np.clip(br_w[1], 0, wh - 1))
-    right_edge_pts: list[tuple[float, float]] = []
-    for row in range(y_re_lo, y_re_hi + 1):
-        nz = np.where(blue_loose[row, :] > 0)[0]
-        if len(nz) > 0:
-            right_edge_pts.append((float(row), float(nz[-1])))
-
-    if len(right_edge_pts) >= 10:
-        ys_re = np.array([p[0] for p in right_edge_pts])
-        xs_re = np.array([p[1] for p in right_edge_pts])
-        a_re, b_re = np.polyfit(ys_re, xs_re, 1)   # x = a*y + b
-        # TR.x = right edge evaluated at TL.y
-        tr_x_w = float(a_re * tl_w[1] + b_re)
-        # TR.y = TL.y (horizontal-top approximation; safe — cannot enter EXIT cap)
-        tr_y_w = float(tl_w[1])
-        tr_fixed = {"x": tr_x_w * sb, "y": tr_y_w * sb}
-    else:
-        # Fallback: parallelogram rule clamped to TL.y
-        tr_fixed = {
-            "x": (grounded_tl["x"] + br_d["x"] - bl_d["x"]),
-            "y": grounded_tl["y"],
-        }
-
-    return [grounded_tl, tr_fixed, br_d, bl_d]
+    return best_q
 
 
 def detect_sign_quad_from_detections(

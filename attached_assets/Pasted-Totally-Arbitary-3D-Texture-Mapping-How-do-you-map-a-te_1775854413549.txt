@@ -1,0 +1,162 @@
+Totally Arbitary 3D Texture Mapping
+
+How do you map a texture onto a polygon in a scene if you did not generate the polygon yourself, and have no idea of it's exact orientation in 3D space?
+
+
+Let's say, for example, you were trying to photo-manipulate this image, and you wanted to change the picture on the wall to the left of the picture. This picture came out of a book, so I have no idea about the exact position of the camera or the wall. How is it possible to map a picture, with correct perspective onto the wall?
+
+
+
+I want to pretend that this picture by Dali was hanging on the wall.
+
+
+Well, all you really need to know is the shape of the rectangle on the picture. The shape of the rectangle contains all the information about it's position in 3D space. Note, this only works for rectangles, not triangles. Actually it will work for any shapes that have at least two pairs or parallel edges, like octagons.
+
+Find the four corners of the rectangle.
+
+
+For now, we can ignore the rest of the picture, and just concentrate on analysing the rectangle. This method will recursively subdivide the rectangle into four smaller rectangles. The recursion will continue until each small rectangle is as big as a single pixel.
+
+
+The first thing you'll need to do is to find the center of the rectangle as it would appear in perspective. This is done by finding the intersection between the line AC and BD. I'll call this point O.
+
+Next, find the two vanishing points of the rectangle.
+V1, can be found by intersecting the lines BC and AD.
+V2, can be found by intersecting the lines AB and DC.
+
+
+The vanishing points are often quite far away, and in this case, exist off the picture.
+
+
+Now, you will need to find the centre of each edge of the rectangle as it would appear in 3D. Again, this involves lots of line intersections.
+
+i1 is the intersection between the lines AB and OV1
+i2 is the intersection between the lines BC and OV2
+i3 is the intersection between the lines CD and OV1
+i4 is the intersection between the lines AD and OV2
+
+
+Now that you have all these new points, you can use them to construct four new small rectangles.
+
+
+	Rectangle 1 is (A,  i1, O,  i4)
+	Rectangle 2 is (i1, B,  i2, O)
+	Rectangle 3 is (O,  i2, C,  i3)
+	Rectangle 4 is (i4, O,  i3, D)
+
+
+
+Now, continue the recursion. There is no need to keep recalculating V1 and V2, you should use the coordinates you first calculated.
+
+It is advisable to use floating or fixed point calculations throughout for accuracy. The result will probably look rubbish if you used integers.
+
+
+While you are recursing the rectangles on the picture, you should also be keeping track of where each rectangle belongs on the texture you want to map onto this photograph, so that, when the rectangles become small enough, you can copy a pixel from the texture map onto the photo.
+Keep subdividingthe rectangles until the size of a rectangle is less than a pixel on the photo. Alternatively, you can subdivide until the size of the rectangles is quite small, then linearly texturemap.
+
+
+Since this is not the easiest thing in the world to explain in words, I shall provide you with some pseudo code.
+
+structure: POINT
+  FLOAT x, y
+end structure
+
+structure: LINE
+  POINT: p1, p2
+end structure
+
+global variables:
+  POINT: v1, v2
+end global variables
+
+
+procedure main
+
+  Variables: 
+    LINE edge1, edge2
+    POINT a, b, c, d, ta, tb, tc, td
+
+  ask user to specify POINTs a,b,c,d
+
+  edge1 = d-a			// calculate a pair of opposite edges
+  edge2 = c-b
+  v1 = intersection(edge1, edge2)
+
+  edge1 = b-a			// calculate the other pair of opposite edges
+  edge2 = c-d
+  v2 = intersection(edge1, edge2)
+
+  ta = top left of texture
+  tb = bottom left of texture
+  tc = bottom right of texture
+  td = top right of texture
+
+  recurse(a, b, c, d, ta, tb, tc, td)
+
+end procedure main
+
+
+
+procedure recurse(POINT a, POINT b, POINT c, POINT d, POINT ta, POINT tb, POINT tc, POINT td)
+
+// POINTs a,b,c,d are the vertices that make up this rectangle on the photo.
+// POINTs ta, tb, tc, td are the equivalent coordinates on the texture map.
+
+  Variables: 
+    LINE line1, line2			// lines used for calculations
+    POINT o, i1, i2, i3, i4, 		// midpoints of the rectangle on the photo
+    POINT to, ti1, ti2, ti3, ti4	// midpoints of the rectangle on the texture
+
+  if area(a, b, c, d) > 1 then		// if the rectangle is still bigger than a pixel then
+
+    line1 = c-a				// calculate the two lines between opposite corners
+    line2 = d-b
+
+    o = intersection(line1, line2)	// calculate the central point of the rectangle
+ 
+    line1 = v1-o			// line from center to vanishing point 1
+    line2 = b-a
+    i1 = intersection(line1, line2)	// calculate the point i1
+
+    line1 = v2-o			// line from center to vanishing point 2
+    line2 = c-b
+    i2 = intersection(line1, line2)	// calculate the point i2
+
+    line1 = v1-o			// line from center to vanishing point 1
+    line2 = d-c
+    i3 = intersection(line1, line2)	// calculate the point i3
+
+    line1 = v2-o			// line from center to vanishing point 2
+    line2 = d-a
+    i4 = intersection(line1, line2)	// calculate the point i4
+
+    to  = mid(ta,tb,tc,td)
+    ti1 = mid(ta,tb)
+    ti2 = mid(tb,tc)
+    ti3 = mid(tc,td)
+    ti4 = mid(td,ta)
+
+    recurse(a,  i1, o,  i4,   ta, ti1, to, ti4)		// subdivide rectangle 1
+    recurse(i1, b,  i2, o,    ti1, tb, ti2, to)		// subdivide rectangle 2
+    recurse(o,  i2, c,  i3,   to, ti2, tc, ti3)		// subdivide rectangle 3
+    recurse(i4, o,  i3, d,    ti4, to, ti3, td)		// subdivide rectangle 4
+
+else				// otherwise this rectangle is smaller than a pixel, so a
+				// pixel should be drawn
+
+
+    line1 = c-a				// calculate the two lines between opposite corners
+    line2 = d-b
+
+    o = intersection(line1, line2)	// find the middle of the rectangle on the photo
+
+    to  = mid(ta,tb,tc,td)		// find the middle of the rectangle on the texture
+
+    copy pixel from texturemap at point to to photo at point o
+        
+endif
+
+
+end procedure recurse
+
+Firstly, I have not tested this code. Secondly, I am absolutely starving hungry, so I am going to go home and eat. If anyone finds any bugs in this, please let me know. I shall write up some source code as soon as I can.

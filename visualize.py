@@ -197,37 +197,70 @@ def draw_sign_quad(
 
 def _detect_blue_bounds_flat(flat_bgr: np.ndarray) -> tuple[int, int, int, int]:
     """
-    Find the bounding box of the sign's blue panel in a perspective-corrected
-    (flat) image.  Uses strict saturation to separate vivid sign-blue from
-    washed-out sky-blue, then falls back to the full image if nothing is found.
+    Find the bounding box of the MAIN SIGN PANEL in a perspective-corrected
+    (flat) image, excluding any EXIT-cap that may appear at the top.
+
+    Strategy:
+      1. Detect white pixels (sign borders / EXIT-cap separator).
+      2. Scan row-by-row in the top 60 % of the flat image; the last row
+         with high white density is the separator between the EXIT cap and
+         the main sign panel.  Set y_min just below it.
+      3. Within [y_min … bottom], find the leftmost / rightmost / lowest
+         column/row that contains sign-blue pixels → x1, x2, y2.
 
     Returns (x1, y1, x2, y2) in flat-image pixel coords.
     """
     fh, fw = flat_bgr.shape[:2]
     hsv = cv2.cvtColor(flat_bgr, cv2.COLOR_BGR2HSV)
 
-    # Strict blue: sign-panel blue (saturation ≥ 80 distinguishes it from sky)
-    blue = cv2.inRange(hsv, np.array([85, 80, 40]), np.array([140, 255, 230]))
-    ker_c = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 20))
-    ker_o = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10))
-    blue = cv2.morphologyEx(blue, cv2.MORPH_CLOSE, ker_c)
-    blue = cv2.morphologyEx(blue, cv2.MORPH_OPEN,  ker_o)
+    # ── White mask (sign borders and EXIT-cap separator) ─────────────────────
+    white = cv2.inRange(hsv, np.array([0, 0, 160]), np.array([180, 60, 255]))
 
-    n, _, stats, _ = cv2.connectedComponentsWithStats(blue)
-    if n < 2:
-        return 0, 0, fw, fh  # fallback: whole flat image
+    # Per-row white pixel count
+    row_white = np.sum(white > 0, axis=1).astype(float)
 
-    # Largest non-background component
-    best = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-    area_frac = stats[best, cv2.CC_STAT_AREA] / (fw * fh)
-    if area_frac < 0.08:
-        return 0, 0, fw, fh  # tiny blob → fallback
+    # Search for a wide white stripe in the top 60 % of the image.
+    # This stripe is the EXIT-cap / main-sign separator.
+    search_end = int(fh * 0.60)
+    y_min = 0
+    threshold = fw * 0.25   # stripe must span at least 25 % of image width
+    last_white_row = -1
+    for y in range(search_end):
+        if row_white[y] >= threshold:
+            last_white_row = y
+    if last_white_row >= 0:
+        # Advance past the white stripe (skip until blue reappears)
+        y_min = last_white_row + 1
+        while y_min < search_end and row_white[y_min] >= threshold:
+            y_min += 1
+        y_min = min(y_min + 3, fh - 1)  # small extra margin below border
 
-    x1 = int(stats[best, cv2.CC_STAT_LEFT])
-    y1 = int(stats[best, cv2.CC_STAT_TOP])
-    x2 = x1 + int(stats[best, cv2.CC_STAT_WIDTH])
-    y2 = y1 + int(stats[best, cv2.CC_STAT_HEIGHT])
-    return x1, y1, x2, y2
+    # ── Strict blue for main sign panel (below y_min) ────────────────────────
+    blue = cv2.inRange(hsv, np.array([85, 70, 40]), np.array([140, 255, 230]))
+    blue_roi = blue[y_min:, :]
+
+    ker_c = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    ker_o = cv2.getStructuringElement(cv2.MORPH_RECT, (8, 8))
+    blue_roi = cv2.morphologyEx(blue_roi, cv2.MORPH_CLOSE, ker_c)
+    blue_roi = cv2.morphologyEx(blue_roi, cv2.MORPH_OPEN,  ker_o)
+
+    cols_blue = np.sum(blue_roi > 0, axis=0)
+    rows_blue = np.sum(blue_roi > 0, axis=1)
+
+    min_col_px = max(4, int(fh * 0.01))
+    min_row_px = max(4, int(fw * 0.01))
+
+    if not np.any(cols_blue >= min_col_px) or not np.any(rows_blue >= min_row_px):
+        return 0, y_min, fw, fh   # fallback: full width, below separator
+
+    col_mask = cols_blue >= min_col_px
+    row_mask = rows_blue >= min_row_px
+
+    x1 = int(np.argmax(col_mask))
+    x2 = int(fw - np.argmax(col_mask[::-1]))
+    y2 = y_min + int(len(row_mask) - np.argmax(row_mask[::-1]))
+
+    return x1, y_min, x2, y2
 
 
 def draw_sign_corner_grid(
