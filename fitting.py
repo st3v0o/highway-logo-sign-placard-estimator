@@ -536,6 +536,7 @@ def estimate_total_capacity(
     # ROI to trust) go straight to the full-image blue scan so that mock-mode
     # predictions (which use a generic small-image coordinate space) cannot
     # produce a tiny wrong quad that blocks the real detection.
+    print(f"[fitting] grid_mode={grid_mode} perspective_mode={perspective_mode} image_bgr={'yes' if image_bgr is not None else 'None'}")
     if (perspective_mode or grid_mode) and image_bgr is not None:
         if perspective_mode:
             all_preds = (
@@ -546,8 +547,10 @@ def estimate_total_capacity(
                 sign_quad = detect_sign_quad_from_detections(
                     image_bgr, placard_predictions, empty_space_predictions
                 )
+                print(f"[fitting] detect_sign_quad_from_detections => {sign_quad is not None}")
         if sign_quad is None:
             sign_quad = detect_sign_quad_from_blue(image_bgr)
+            print(f"[fitting] detect_sign_quad_from_blue => {sign_quad}")
     if perspective_mode and sign_quad is not None:
         H_s, H_s_inv, dst_w_s, dst_h_s = compute_region_homography(sign_quad)
         sign_homography = (H_s, H_s_inv, dst_w_s, dst_h_s)
