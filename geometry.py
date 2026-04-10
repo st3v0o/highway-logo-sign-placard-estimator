@@ -183,23 +183,25 @@ def detect_sign_quad_from_detections(
     empty_predictions: list[dict],
 ) -> list[dict] | None:
     """
-    Two-phase sign boundary detection.
+    Three-phase approach: ROI → best blue contour → Hough-line quad.
 
-    Phase 1 — tight ROI from detections
-        All detected objects lie inside the sign.  Expand by a small
-        image-relative margin (not detection-relative — that blows up when
-        detections already fill most of the frame).  4 % of image height
-        upward keeps adjacent panels (e.g. EXIT signs) out of the crop; the
-        blue detection in phase 2 recovers the header row from colour alone.
+    Phase 1 — generous ROI (15 % of image height upward)
+        Captures the sign header row above the detections.  Using image-relative
+        padding avoids exploding when detections already fill most of the frame.
 
-    Phase 2 — blue detection inside the ROI
-        Within the tight crop the background is eliminated, so permissive HSV
-        thresholds cleanly isolate the sign body.  A single closing pass fills
-        placard cut-outs and text gaps.  approxPolyDP on the convex hull yields
-        exactly 4 corners — trapezoidal for angled shots, near-rectangular for
-        frontal ones.
+    Phase 2 — blue contour selection
+        Finds all blue connected components and picks the one with the highest
+        overlap with the detection bounding box.  This naturally discards
+        adjacent panels (e.g. an EXIT sign above Popeyes) whose blue area
+        doesn't overlap with any detected placard or empty region.
 
-    Falls back to a plain bbox rectangle if colour detection fails.
+    Phase 3 — Canny + Hough line intersection
+        Runs Canny on the selected contour's filled mask, applies the
+        probabilistic Hough transform to find line segments, clusters them into
+        top / bottom / left / right groups, fits a single representative line
+        per group, and intersects each pair to get the 4 exact sign corners.
+        Produces perspective-correct trapezoid corners for angled shots.
+        Falls back to approxPolyDP → minAreaRect if Hough doesn't converge.
 
     Returns 4 corner dicts in [TL, TR, BR, BL] order, or None on failure.
     """
@@ -208,7 +210,6 @@ def detect_sign_quad_from_detections(
     if not all_preds:
         return None
 
-    # --- collect all detection corners ---
     xs: list[float] = []
     ys: list[float] = []
     for pred in all_preds:
@@ -228,13 +229,10 @@ def detect_sign_quad_from_detections(
     det_x1, det_x2 = min(xs), max(xs)
     det_y1, det_y2 = min(ys), max(ys)
 
-    # --- Phase 1: tight ROI (image-relative, never detection-relative) ---
-    # Upward: 4 % — just the sign top border.  Blue detection in phase 2
-    #   will extend up to the actual sign edge within the crop.
-    # Downward / horizontal: 5 % — sign border on remaining three sides.
-    pad_x  = img_w * 0.05
-    pad_yu = img_h * 0.04
-    pad_yd = img_h * 0.05
+    # --- Phase 1: generous ROI (image-relative) ---
+    pad_x  = img_w * 0.08
+    pad_yu = img_h * 0.15   # enough to include header row above detections
+    pad_yd = img_h * 0.06
 
     roi_x1 = max(0,     int(det_x1 - pad_x))
     roi_y1 = max(0,     int(det_y1 - pad_yu))
@@ -245,18 +243,15 @@ def detect_sign_quad_from_detections(
     if roi.size == 0:
         return _bbox_quad(det_x1, det_y1, det_x2, det_y2, img_w, img_h)
 
-    # --- Phase 2: blue detection inside the ROI ---
+    roi_h, roi_w = roi.shape[:2]
+
+    # --- Phase 2: blue mask → select best contour by detection overlap ---
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    # Highway-sign royal blue: hue 95–130, moderate-to-high saturation,
-    # low-to-medium brightness (excludes bright sky and white text areas).
     mask = cv2.inRange(
         hsv,
         np.array([90,  70,  25], dtype=np.uint8),
         np.array([135, 255, 220], dtype=np.uint8),
     )
-
-    # Close only — fill placard cutouts and text gaps without breaking
-    # connections between sign regions.
     kc = np.ones((15, 15), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kc)
 
@@ -264,41 +259,151 @@ def detect_sign_quad_from_detections(
     if not contours:
         return _bbox_quad(det_x1, det_y1, det_x2, det_y2, img_w, img_h)
 
-    best = max(contours, key=cv2.contourArea)
-    if cv2.contourArea(best) < 0.04 * roi.shape[0] * roi.shape[1]:
-        return _bbox_quad(det_x1, det_y1, det_x2, det_y2, img_w, img_h)
+    # Detection bbox in ROI-local coordinates
+    dlx1 = det_x1 - roi_x1
+    dly1 = det_y1 - roi_y1
+    dlx2 = det_x2 - roi_x1
+    dly2 = det_y2 - roi_y1
 
-    hull = cv2.convexHull(best)
+    def _overlap_score(cnt):
+        area = cv2.contourArea(cnt)
+        if area < 0.02 * roi_h * roi_w:
+            return -1.0
+        cx, cy, cw, ch = cv2.boundingRect(cnt)
+        ix1 = max(cx, dlx1);  ix2 = min(cx + cw, dlx2)
+        iy1 = max(cy, dly1);  iy2 = min(cy + ch, dly2)
+        if ix2 <= ix1 or iy2 <= iy1:
+            return -1.0
+        return (ix2 - ix1) * (iy2 - iy1) / max(cw * ch, 1)
+
+    scored = sorted(contours, key=_overlap_score, reverse=True)
+    best_cnt = scored[0] if _overlap_score(scored[0]) >= 0.15 else max(contours, key=cv2.contourArea)
+
+    # --- Phase 3: Canny + Hough lines → intersect to get 4 corners ---
+    cnt_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+    cv2.drawContours(cnt_mask, [best_cnt], 0, 255, -1)
+    edges = cv2.Canny(cnt_mask, 50, 150)
+
+    min_len = min(roi_h, roi_w) * 0.15
+    lines = cv2.HoughLinesP(
+        edges, 1, np.pi / 180,
+        threshold=40,
+        minLineLength=min_len,
+        maxLineGap=20,
+    )
+
+    if lines is not None and len(lines) >= 4:
+        quad = _hough_to_quad(lines.reshape(-1, 4), roi_x1, roi_y1)
+        if quad is not None:
+            return quad
+
+    # Fallback: approxPolyDP on convex hull
+    hull = cv2.convexHull(best_cnt)
     peri = cv2.arcLength(hull, True)
-    quad_pts: np.ndarray | None = None
     for eps in [0.02, 0.04, 0.06, 0.08, 0.10, 0.13, 0.16, 0.20, 0.25]:
         approx = cv2.approxPolyDP(hull, eps * peri, True)
         if len(approx) == 4:
-            quad_pts = approx.reshape(-1, 2).astype(np.float32)
-            break
+            pts = approx.reshape(-1, 2).astype(np.float32)
+            pts[:, 0] += roi_x1;  pts[:, 1] += roi_y1
+            return _four_extreme_hull_points(pts)
 
-    if quad_pts is None:
-        rect = cv2.minAreaRect(hull)
-        quad_pts = cv2.boxPoints(rect).astype(np.float32)
+    rect = cv2.minAreaRect(hull)
+    pts = cv2.boxPoints(rect).astype(np.float32)
+    pts[:, 0] += roi_x1;  pts[:, 1] += roi_y1
+    return _four_extreme_hull_points(pts)
 
-    # Translate ROI-local → full image
-    quad_pts[:, 0] += roi_x1
-    quad_pts[:, 1] += roi_y1
 
-    return _four_extreme_hull_points(quad_pts)
+def _hough_to_quad(
+    lines: np.ndarray,
+    roi_x1: int,
+    roi_y1: int,
+) -> list[dict] | None:
+    """
+    Given an (N, 4) array of Hough line segments (x1,y1,x2,y2 in ROI coords),
+    cluster into top/bottom/left/right groups, fit one line per group via
+    cv2.fitLine, intersect pairs to get 4 corners, return full-image coords.
+    """
+    h_segs, v_segs = [], []
+    for x1, y1, x2, y2 in lines:
+        angle = abs(float(np.degrees(np.arctan2(y2 - y1, x2 - x1))))
+        if angle < 30 or angle > 150:
+            h_segs.append((x1, y1, x2, y2))
+        elif 60 < angle < 120:
+            v_segs.append((x1, y1, x2, y2))
+
+    if len(h_segs) < 2 or len(v_segs) < 2:
+        return None
+
+    def mid_y(s): return (s[1] + s[3]) / 2.0
+    def mid_x(s): return (s[0] + s[2]) / 2.0
+
+    h_sorted = sorted(h_segs, key=mid_y)
+    v_sorted = sorted(v_segs, key=mid_x)
+
+    k_h = max(1, len(h_sorted) // 4)
+    k_v = max(1, len(v_sorted) // 4)
+
+    top_segs   = h_sorted[:k_h]
+    bot_segs   = h_sorted[-k_h:]
+    left_segs  = v_sorted[:k_v]
+    right_segs = v_sorted[-k_v:]
+
+    def fit_abc(segs):
+        """Return (a, b, c) of normalised line  ax + by + c = 0."""
+        pts = np.array([[(s[0] + s[2]) / 2, (s[1] + s[3]) / 2] for s in segs],
+                       dtype=np.float32)
+        if len(pts) == 1:
+            x1, y1, x2, y2 = segs[0]
+            a, b = float(y2 - y1), float(x1 - x2)
+            c = float(x2 * y1 - x1 * y2)
+        else:
+            vx, vy, cx, cy = [float(v) for v in
+                               cv2.fitLine(pts.reshape(-1, 1, 2), cv2.DIST_L2, 0, 0.01, 0.01)]
+            a, b = -vy, vx
+            c = cy * vy - cx * vx
+        n = max(float(np.sqrt(a * a + b * b)), 1e-9)
+        return a / n, b / n, c / n
+
+    def intersect(l1, l2):
+        a1, b1, c1 = l1;  a2, b2, c2 = l2
+        det = a1 * b2 - a2 * b1
+        if abs(det) < 1e-6:
+            return None
+        return (-c1 * b2 + c2 * b1) / det, (-a1 * c2 + a2 * c1) / det
+
+    top   = fit_abc(top_segs)
+    bot   = fit_abc(bot_segs)
+    left  = fit_abc(left_segs)
+    right = fit_abc(right_segs)
+
+    tl = intersect(top, left)
+    tr = intersect(top, right)
+    br = intersect(bot, right)
+    bl = intersect(bot, left)
+
+    if any(pt is None for pt in [tl, tr, br, bl]):
+        return None
+
+    pts = np.array([
+        [tl[0] + roi_x1, tl[1] + roi_y1],
+        [tr[0] + roi_x1, tr[1] + roi_y1],
+        [br[0] + roi_x1, br[1] + roi_y1],
+        [bl[0] + roi_x1, bl[1] + roi_y1],
+    ], dtype=np.float32)
+    return _four_extreme_hull_points(pts)
 
 
 def _bbox_quad(
     x1: float, y1: float, x2: float, y2: float,
     img_w: int, img_h: int,
 ) -> list[dict]:
-    """Plain detection-union rectangle, used as fallback."""
+    """Plain detection-union rectangle — last-resort fallback."""
     pad = min(img_w, img_h) * 0.04
     corners = np.array([
-        [max(0.0, x1 - pad), max(0.0, y1 - pad)],
+        [max(0.0, x1 - pad),          max(0.0, y1 - pad)],
         [min(float(img_w), x2 + pad), max(0.0, y1 - pad)],
         [min(float(img_w), x2 + pad), min(float(img_h), y2 + pad)],
-        [max(0.0, x1 - pad), min(float(img_h), y2 + pad)],
+        [max(0.0, x1 - pad),          min(float(img_h), y2 + pad)],
     ], dtype=np.float32)
     return _four_extreme_hull_points(corners)
 
