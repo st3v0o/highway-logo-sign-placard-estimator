@@ -532,6 +532,25 @@ def estimate_total_capacity(
         )
         grid_info = {"row_centers": grid_row_centers, "col_centers": grid_col_centers}
 
+        # When perspective mode is also active, additionally compute the flat-space
+        # grid so that visualize.py can draw the grid lines projected through H_inv
+        # (i.e. the lines follow the sign's real perspective angle).
+        if sign_homography is not None and placard_predictions:
+            H_g, H_g_inv, dst_w_g, dst_h_g = sign_homography
+            img_centers = [(float(p["x"]), float(p["y"])) for p in placard_predictions]
+            flat_centers = _project_points_through_H(H_g, img_centers)
+            flat_preds = [{"x": c[0], "y": c[1]} for c in flat_centers]
+            flat_rows, flat_cols = infer_and_extend_grid(
+                flat_preds, placard_w, placard_h, spacing, dst_w_g, dst_h_g
+            )
+            grid_info.update({
+                "flat_row_centers": flat_rows,
+                "flat_col_centers": flat_cols,
+                "H_inv": H_g_inv,
+                "dst_w": dst_w_g,
+                "dst_h": dst_h_g,
+            })
+
     global_reserved = np.zeros((img_h, img_w), dtype=np.uint8)
 
     for idx, region_pred in enumerate(valid_regions):

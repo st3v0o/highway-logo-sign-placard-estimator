@@ -117,30 +117,74 @@ def draw_proposed_placements(
 COLOR_GRID = (255, 220, 0)  # Yellow-cyan — grid lines
 
 
+def _project_line_through_H_inv(
+    H_inv: np.ndarray,
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """
+    Project two flat-space endpoints through H_inv to get image-space endpoints.
+    Returns a pair of integer (x, y) tuples.
+    """
+    def proj(pt):
+        v = np.array([pt[0], pt[1], 1.0], dtype=np.float64)
+        out = H_inv @ v
+        return (int(round(out[0] / out[2])), int(round(out[1] / out[2])))
+    return proj(p0), proj(p1)
+
+
 def draw_grid_lines(
     img: np.ndarray,
     row_centers: list[float],
     col_centers: list[float],
     alpha: float = 0.45,
+    flat_row_centers: list[float] | None = None,
+    flat_col_centers: list[float] | None = None,
+    H_inv: np.ndarray | None = None,
+    dst_w: int | None = None,
+    dst_h: int | None = None,
 ) -> np.ndarray:
     """
     Draw the inferred row/column grid as semi-transparent lines.
 
-    Rows are horizontal lines, columns are vertical lines.
-    Uses addWeighted for transparency so the sign is still visible underneath.
+    When flat_row_centers/flat_col_centers and H_inv are provided (perspective mode),
+    each grid line is drawn by projecting its flat-space endpoints through H_inv so the
+    lines follow the sign's real perspective angle (converging toward the vanishing point).
+
+    Otherwise falls back to straight horizontal/vertical lines in image space.
     """
     img_h, img_w = img.shape[:2]
     overlay = img.copy()
 
-    for ry in row_centers:
-        y = int(round(ry))
-        if 0 <= y < img_h:
-            cv2.line(overlay, (0, y), (img_w - 1, y), COLOR_GRID, 1, cv2.LINE_AA)
+    use_perspective = (
+        flat_row_centers is not None
+        and flat_col_centers is not None
+        and H_inv is not None
+        and dst_w is not None
+        and dst_h is not None
+    )
 
-    for cx in col_centers:
-        x = int(round(cx))
-        if 0 <= x < img_w:
-            cv2.line(overlay, (x, 0), (x, img_h - 1), COLOR_GRID, 1, cv2.LINE_AA)
+    if use_perspective:
+        # Row lines: horizontal lines in flat space → projected to image space
+        for ry in flat_row_centers:
+            pt_a, pt_b = _project_line_through_H_inv(H_inv, (0.0, ry), (float(dst_w), ry))
+            cv2.line(overlay, pt_a, pt_b, COLOR_GRID, 1, cv2.LINE_AA)
+
+        # Column lines: vertical lines in flat space → projected to image space
+        for cx in flat_col_centers:
+            pt_a, pt_b = _project_line_through_H_inv(H_inv, (cx, 0.0), (cx, float(dst_h)))
+            cv2.line(overlay, pt_a, pt_b, COLOR_GRID, 1, cv2.LINE_AA)
+    else:
+        # Non-perspective: straight horizontal/vertical lines in image space
+        for ry in row_centers:
+            y = int(round(ry))
+            if 0 <= y < img_h:
+                cv2.line(overlay, (0, y), (img_w - 1, y), COLOR_GRID, 1, cv2.LINE_AA)
+
+        for cx in col_centers:
+            x = int(round(cx))
+            if 0 <= x < img_w:
+                cv2.line(overlay, (x, 0), (x, img_h - 1), COLOR_GRID, 1, cv2.LINE_AA)
 
     cv2.addWeighted(overlay, alpha, img, 1.0 - alpha, 0, img)
     return img
@@ -164,7 +208,16 @@ def render_annotated_image(
     img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
     if grid:
-        img = draw_grid_lines(img, grid["row_centers"], grid["col_centers"])
+        img = draw_grid_lines(
+            img,
+            grid["row_centers"],
+            grid["col_centers"],
+            flat_row_centers=grid.get("flat_row_centers"),
+            flat_col_centers=grid.get("flat_col_centers"),
+            H_inv=grid.get("H_inv"),
+            dst_w=grid.get("dst_w"),
+            dst_h=grid.get("dst_h"),
+        )
 
     img = draw_empty_regions(img, empty_space_predictions, min_confidence)
     img = draw_placards(img, placard_predictions, min_confidence)
