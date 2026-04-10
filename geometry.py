@@ -181,58 +181,107 @@ def detect_sign_quad_from_detections(
     img_bgr: np.ndarray,
     placard_predictions: list[dict],
     empty_predictions: list[dict],
-    expand: float = 0.12,
+    roi_expand: float = 0.28,
 ) -> list[dict] | None:
     """
-    Derive the sign quad directly from the polygon points returned by inference.
+    Detect the sign quad using a two-phase approach:
 
-    Strategy
-    --------
-    The Roboflow model returns polygon corners for each detected region.  Those
-    points already lie ON the sign surface in perspective-correct image coords —
-    no colour thresholding or image processing needed.
+    Phase 1 — ROI from detections
+        Build a bounding box over all polygon/bbox points from every detected
+        region.  Those points lie inside the sign, so their bbox is a reliable
+        anchor.  Expanding by `roi_expand` (e.g. 28%) includes the sign border
+        and ensures sky / trees / adjacent signs are outside the crop.
 
-    1. Collect every polygon point from every detection (placard + empty-space).
-       Fall back to the 4 bbox corners for any detection that has no polygon.
-    2. Compute the convex hull of all collected points.
-    3. Expand the hull outward from its centroid by `expand` (e.g. 12%) so the
-       boundary includes the sign border/frame that lies just outside the
-       detected regions.
-    4. Reduce to 4 corners via the TL/TR/BR/BL extreme-point heuristic.
+    Phase 2 — Blue-edge detection inside the ROI
+        Within the tight crop, background is gone.  Run a permissive blue-pixel
+        threshold, close small gaps, find the largest contour (the sign body),
+        and simplify it to exactly 4 corners via approxPolyDP on its convex
+        hull.  approxPolyDP naturally handles trapezoidal / perspective shapes
+        and rounded sign corners far better than minAreaRect (which tries to
+        minimise area and can introduce unwanted rotation).
 
-    This is perspective-correct by construction and requires no image analysis.
-    Returns None when no predictions are available.
+    Returns 4 corner dicts in [TL, TR, BR, BL] order, or None on failure.
     """
+    img_h, img_w = img_bgr.shape[:2]
     all_preds = placard_predictions + empty_predictions
     if not all_preds:
         return None
 
-    pts: list[list[float]] = []
+    # --- Phase 1: ROI from all detection point coordinates ---
+    xs: list[float] = []
+    ys: list[float] = []
     for pred in all_preds:
         polygon = pred.get("points", [])
         if polygon:
             for p in polygon:
-                pts.append([float(p["x"]), float(p["y"])])
+                xs.append(float(p["x"]))
+                ys.append(float(p["y"]))
         else:
             x1, y1, x2, y2 = bbox_to_xyxy(pred)
-            pts += [[float(x1), float(y1)], [float(x2), float(y1)],
-                    [float(x2), float(y2)], [float(x1), float(y2)]]
+            xs += [float(x1), float(x2)]
+            ys += [float(y1), float(y2)]
 
-    if len(pts) < 4:
+    if not xs:
         return None
 
-    arr = np.array(pts, dtype=np.float32)
-    hull = cv2.convexHull(arr).reshape(-1, 2)
+    det_x1, det_x2 = min(xs), max(xs)
+    det_y1, det_y2 = min(ys), max(ys)
+    det_w = max(det_x2 - det_x1, 1)
+    det_h = max(det_y2 - det_y1, 1)
 
-    # Expand outward from the centroid so the border/frame is included
-    centroid = hull.mean(axis=0)
-    expanded = centroid + (hull - centroid) * (1.0 + expand)
+    mx = int(det_w * roi_expand)
+    my = int(det_h * roi_expand)
+    roi_x1 = max(0,     int(det_x1) - mx)
+    roi_y1 = max(0,     int(det_y1) - my)
+    roi_x2 = min(img_w, int(det_x2) + mx)
+    roi_y2 = min(img_h, int(det_y2) + my)
 
-    img_h, img_w = img_bgr.shape[:2]
-    expanded[:, 0] = np.clip(expanded[:, 0], 0, img_w - 1)
-    expanded[:, 1] = np.clip(expanded[:, 1], 0, img_h - 1)
+    roi = img_bgr[roi_y1:roi_y2, roi_x1:roi_x2]
+    if roi.size == 0:
+        return None
 
-    return _four_extreme_hull_points(expanded)
+    # --- Phase 2: blue-edge detection inside the ROI ---
+    # Permissive thresholds are fine here — sky / trees are outside the crop.
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(
+        hsv,
+        np.array([85,  50,  25], dtype=np.uint8),
+        np.array([135, 255, 255], dtype=np.uint8),
+    )
+
+    kc = np.ones((15, 15), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kc)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    best_cnt = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(best_cnt) < 0.04 * roi.shape[0] * roi.shape[1]:
+        return None
+
+    # approxPolyDP on the convex hull to get clean 4-corner polygon.
+    # This handles trapezoids (perspective) and rounded corners much better
+    # than minAreaRect, which can introduce spurious rotation.
+    hull = cv2.convexHull(best_cnt)
+    peri = cv2.arcLength(hull, True)
+    quad_pts: np.ndarray | None = None
+    for eps_frac in [0.02, 0.04, 0.06, 0.08, 0.10, 0.13, 0.16, 0.20, 0.25]:
+        approx = cv2.approxPolyDP(hull, eps_frac * peri, True)
+        if len(approx) == 4:
+            quad_pts = approx.reshape(-1, 2).astype(np.float32)
+            break
+
+    if quad_pts is None:
+        # Fallback: minAreaRect if approxPolyDP never converges to 4 pts
+        rect = cv2.minAreaRect(hull)
+        quad_pts = cv2.boxPoints(rect).astype(np.float32)
+
+    # Translate from ROI-local → full-image coordinates
+    quad_pts[:, 0] += roi_x1
+    quad_pts[:, 1] += roi_y1
+
+    return _four_extreme_hull_points(quad_pts)
 
 
 def simplify_polygon_to_quad(points: list[dict]) -> list[dict] | None:
