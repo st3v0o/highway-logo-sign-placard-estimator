@@ -284,8 +284,6 @@ def render_annotated_image(
     if sign_quad:
         img = draw_sign_quad(img, sign_quad)
 
-    img = draw_empty_regions(img, empty_space_predictions, min_confidence)
-    img = draw_placards(img, placard_predictions, min_confidence)
     img = draw_proposed_placements(img, per_region)
 
     img_rgb_out = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)

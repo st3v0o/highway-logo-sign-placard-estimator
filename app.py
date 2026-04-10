@@ -481,11 +481,7 @@ def _render_results(results_list: list) -> None:
 
         col_img, col_stats = st.columns([3, 1])
         with col_img:
-            st.caption(
-                "**Green** = existing placards   "
-                "**Orange** = empty regions   "
-                "**Cyan** = proposed new placements"
-            )
+            st.caption("**Cyan** = proposed new placements")
             st.image(item["annotated_bytes"], use_container_width=True)
 
         with col_stats:
