@@ -899,20 +899,19 @@ def detect_sign_quad(
         return None
 
     # ── TR / TL post-processing fix ────────────────────────────────────────
-    # Problem: the EXIT-sign cap above the main sign can pull TL *and* TR
-    # upward regardless of which method wins.  Diagnostic output showed that
-    # for the Popeyes sign, the Hough method wins but places TL at y=170
-    # (inside the EXIT cap), while the other three methods correctly place TL
-    # at y≈290 (the main sign's actual top-left).
+    # Two-part fix for EXIT-cap signs:
     #
-    # Fix in two steps:
-    #   1. "Grounded TL" — take the TL with the LARGEST y across all
-    #      candidates.  EXIT-cap inflation always pushes TL UP (smaller y), so
-    #      the candidate with the biggest y is the most accurate.
-    #   2. Blue-mask scan for right boundary — scan the blue mask in the
-    #      central y-band (using grounded TL and the winner's BL) to find the
-    #      main sign's true right edge, then extrapolate TR.y from grounded TL
-    #      along the bottom-edge perspective slope.
+    # 1. Grounded TL — every detection method can place TL up in the EXIT cap.
+    #    The candidate with the *largest* TL.y is the least contaminated because
+    #    EXIT-cap inflation always pulls TL *upward* (smaller y).
+    #
+    # 2. Right-edge line for TR — the old approach extrapolated TR.y from the
+    #    bottom-edge slope (BL→BR), but top and bottom edges are NOT parallel in
+    #    perspective so that always overshoots into the EXIT cap.
+    #    Instead: fit the sign's right-edge as a line by scanning rightmost blue
+    #    pixels from TL.y downward to BR.y (all below the EXIT cap).  Predict
+    #    TR.x where that line meets TL.y, and set TR.y = TL.y (the horizontal
+    #    approximation is always safe — it cannot extend into the EXIT cap above).
     _, _, br_d, bl_d = best_q   # BL and BR are reliable from the winner
 
     # Step 1: grounded TL
@@ -924,39 +923,31 @@ def detect_sign_quad(
     bl_w = np.array([bl_d["x"] * sw, bl_d["y"] * sw])
     br_w = np.array([br_d["x"] * sw, br_d["y"] * sw])
 
-    sign_h_w = max(bl_w[1] - tl_w[1], 1.0)
-
-    # Step 2: scan the central y-band (40 %–80 % of sign height) for right edge
-    y_lo = int(np.clip(tl_w[1] + 0.40 * sign_h_w, 0, wh - 1))
-    y_hi = int(np.clip(tl_w[1] + 0.80 * sign_h_w, 0, wh - 1))
-
-    right_cols: list[int] = []
-    for row in range(y_lo, y_hi + 1):
+    # Step 2: fit the sign's right edge from TL level down to BR level.
+    # This band is always below the EXIT cap (grounded TL ensures TL.y > cap),
+    # so the rightmost blue pixels faithfully trace the sign's right boundary.
+    y_re_lo = int(np.clip(tl_w[1], 0, wh - 1))
+    y_re_hi = int(np.clip(br_w[1], 0, wh - 1))
+    right_edge_pts: list[tuple[float, float]] = []
+    for row in range(y_re_lo, y_re_hi + 1):
         nz = np.where(blue_loose[row, :] > 0)[0]
         if len(nz) > 0:
-            right_cols.append(int(nz[-1]))
+            right_edge_pts.append((float(row), float(nz[-1])))
 
-    if len(right_cols) >= 5:
-        right_x_w = float(np.percentile(right_cols, 80))
-
-        # Perspective slope from bottom edge (BL→BR)
-        bot_dx = br_w[0] - bl_w[0]
-        bot_dy = br_w[1] - bl_w[1]
-
-        # Extrapolate grounded TL rightward along that slope to right_x_w
-        dx_to_right = right_x_w - tl_w[0]
-        if abs(bot_dx) > 1e-3:
-            t = dx_to_right / bot_dx
-            tr_y_w = tl_w[1] + t * bot_dy
-        else:
-            tr_y_w = tl_w[1]
-
-        tr_fixed = {"x": right_x_w * sb, "y": tr_y_w * sb}
+    if len(right_edge_pts) >= 10:
+        ys_re = np.array([p[0] for p in right_edge_pts])
+        xs_re = np.array([p[1] for p in right_edge_pts])
+        a_re, b_re = np.polyfit(ys_re, xs_re, 1)   # x = a*y + b
+        # TR.x = right edge evaluated at TL.y
+        tr_x_w = float(a_re * tl_w[1] + b_re)
+        # TR.y = TL.y (horizontal-top approximation; safe — cannot enter EXIT cap)
+        tr_y_w = float(tl_w[1])
+        tr_fixed = {"x": tr_x_w * sb, "y": tr_y_w * sb}
     else:
-        # Fallback: parallelogram rule
+        # Fallback: parallelogram rule clamped to TL.y
         tr_fixed = {
-            "x": grounded_tl["x"] + br_d["x"] - bl_d["x"],
-            "y": grounded_tl["y"] + br_d["y"] - bl_d["y"],
+            "x": (grounded_tl["x"] + br_d["x"] - bl_d["x"]),
+            "y": grounded_tl["y"],
         }
 
     return [grounded_tl, tr_fixed, br_d, bl_d]
