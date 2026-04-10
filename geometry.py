@@ -93,9 +93,9 @@ def prediction_to_mask(pred: dict, img_h: int, img_w: int) -> tuple[np.ndarray, 
 
 def detect_sign_quad_from_blue(
     img_bgr: np.ndarray,
-    s_min: int = 120,
-    v_max: int = 200,
-    open_k: int = 20,
+    s_min: int = 140,
+    v_max: int = 180,
+    open_k: int = 12,
     outlier_mult: float = 1.3,
     _work_width: int = 1000,
 ) -> list[dict] | None:
@@ -130,18 +130,43 @@ def detect_sign_quad_from_blue(
 
     hsv = cv2.cvtColor(img_work, cv2.COLOR_BGR2HSV)
 
-    # Highway blue signs: highly saturated, moderately bright blue.
-    # Clear sky is low-saturation and very bright (S ≈ 60-90, V > 200).
+    # Highway sign blue: very saturated, moderately dark royal blue.
+    # Clear sky: similar hue but less saturated (S < 140) and brighter (V > 180).
     lower_blue = np.array([90, s_min, 40],    dtype=np.uint8)
     upper_blue = np.array([130, 255, v_max],  dtype=np.uint8)
     mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
-    # Open first (remove thin bridges connecting sign panels to each other or
-    # to sky blobs), then close (fill internal holes / text gaps in the sign body).
+    # Keep a copy of the raw (pre-morphology) mask so the gap-detection step
+    # can see structural air-gaps between separate sign structures (EXIT sign vs
+    # main sign) that morphological closing would otherwise bridge over.
+    mask_raw = mask.copy()
+
+    # Smaller open (k=12) preserves the narrow blue strips between logo panels in
+    # multi-panel signs, which a k=20 opening would erase.
+    # Larger close (k=40) bridges inter-row gaps within the same sign body.
     k_open  = np.ones((open_k, open_k), np.uint8)
-    k_close = np.ones((25, 25),         np.uint8)
+    k_close = np.ones((40, 40),         np.uint8)
     mask_open_only = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k_open)
     mask = cv2.morphologyEx(mask_open_only, cv2.MORPH_CLOSE, k_close)
+
+    # ── Sky-from-top suppression ──────────────────────────────────────────────
+    # On images taken against a vivid blue sky, the HSV ranges can overlap with
+    # sign blue.  Remove sky rows by scanning downward from the image top: any
+    # row where more than 50 % of pixels are blue is classified as sky/EXIT-sign
+    # and zeroed out.  We stop as soon as we find a clearly non-blue row
+    # (< 20 % blue), which marks the start of the sign's white border.
+    _top_scan = int(0.18 * work_h)
+    _sky_end  = 0
+    for _ri in range(_top_scan):
+        _d = float(mask[_ri, :].sum()) / 255.0 / _work_width
+        if _d > 0.50:
+            _sky_end = _ri + 1      # extend the crop boundary
+        elif _d < 0.20 and _sky_end > 0:
+            break                   # confirmed white-border/gap row → stop
+    if _sky_end > 0:
+        mask[:_sky_end, :]           = 0
+        mask_open_only[:_sky_end, :] = 0
+        mask_raw[:_sky_end, :]       = 0
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -149,9 +174,10 @@ def detect_sign_quad_from_blue(
 
     img_h_w, img_w_w = img_work.shape[:2]
     img_area = img_h_w * img_w_w
-    min_area = 0.05 * img_area
+    min_area = 0.03 * img_area   # 3 % (was 5 %) to catch sub-panels in large signs
 
-    # Collect all large-enough contours with their centroids
+    # Collect all large-enough contours with their centroids.
+    # Prefer contours that do NOT touch the very top of the image (sky-touching).
     candidates = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
@@ -255,14 +281,52 @@ def detect_sign_quad_from_blue(
             mid_y = lambda s: (s[1] + s[3]) / 2  # noqa: E731
             mid_x = lambda s: (s[0] + s[2]) / 2  # noqa: E731
 
-            # TOP: horizontal segs in the 15–60 % vertical band of the bbox.
-            # This skips the EXIT/GAS header (< 15 %) while staying above the
-            # midline so we find the main panel's top, not its bottom.
-            top_segs = _band_pick(h_sorted,
-                                   by + 0.15 * bh, by + 0.60 * bh,
-                                   mid_y, take_top=True)
-            if top_segs is None:
-                top_segs = h_sorted[:k_h]          # fallback: topmost overall
+            # TOP: gap-aware adaptive strategy.
+            #
+            # Scan the OPEN-ONLY mask (before closing) in the top 15 % of the
+            # bounding box looking for a structural gap — a row-band where blue
+            # density drops to less than 25 % of the local peak.  Such a gap
+            # signals a separate EXIT/GAS header sign above the main panel.
+            # (The close step fills that gap, so we must look at mask_open_only.)
+            #
+            # • If a header gap exists → use the 15–60 % banded approach to
+            #   skip the header and find the main panel's true top edge.
+            # • If no gap → the contour is a unified sign (single-panel or
+            #   multi-row); use the topmost Hough segments directly.
+            x_lo_top = max(0, bx)
+            x_hi_top = min(mask.shape[1], bx + bw)
+            scan_top_r = by
+            scan_15_r  = min(by + int(0.15 * bh), mask.shape[0] - 1)
+
+            has_header_gap = False
+            if scan_15_r > scan_top_r and x_hi_top > x_lo_top:
+                col_w = x_hi_top - x_lo_top
+                # Use the RAW mask (before morphology) so the physical air-gap
+                # between an EXIT sign and the main sign body is still visible.
+                # Tighten the ratio to < 10 % of peak: logo-panel interiors still
+                # have border pixels (≥ 10 % density) whereas a true sky/air gap
+                # between separate sign structures is essentially zero.
+                raw_dens = [
+                    float(mask_raw[r, x_lo_top:x_hi_top].sum())
+                    / 255.0 / col_w
+                    for r in range(scan_top_r, scan_15_r)
+                ]
+                if raw_dens:
+                    peak_d = max(raw_dens)
+                    min_d  = min(raw_dens)
+                    if peak_d > 0.20 and min_d < 0.10 * peak_d:
+                        has_header_gap = True
+
+            if has_header_gap:
+                # EXIT/GAS header above main sign → skip header, find main top
+                top_segs = _band_pick(h_sorted,
+                                      by + 0.15 * bh, by + 0.60 * bh,
+                                      mid_y, take_top=True)
+                if top_segs is None:
+                    top_segs = h_sorted[:max(k_h, 3)]
+            else:
+                # Unified sign: topmost Hough segments are the genuine sign top
+                top_segs = h_sorted[:max(k_h, 3)]
 
             # BOTTOM: use a density-minimum scan on the blue mask to locate the
             # sign panel's actual bottom edge.
