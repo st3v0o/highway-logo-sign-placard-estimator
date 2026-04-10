@@ -181,24 +181,19 @@ def detect_sign_quad_from_detections(
     img_bgr: np.ndarray,
     placard_predictions: list[dict],
     empty_predictions: list[dict],
-    roi_expand: float = 0.28,
 ) -> list[dict] | None:
     """
-    Detect the sign quad using a two-phase approach:
+    Derive the sign boundary quad directly from the detection bounding boxes.
 
-    Phase 1 — ROI from detections
-        Build a bounding box over all polygon/bbox points from every detected
-        region.  Those points lie inside the sign, so their bbox is a reliable
-        anchor.  Expanding by `roi_expand` (e.g. 28%) includes the sign border
-        and ensures sky / trees / adjacent signs are outside the crop.
+    All detected placards and empty regions lie *inside* the sign, so the
+    union of their bounding boxes — expanded outward to include the sign
+    header, border, and any undetected edges — IS the sign boundary.
 
-    Phase 2 — Blue-edge detection inside the ROI
-        Within the tight crop, background is gone.  Run a permissive blue-pixel
-        threshold, close small gaps, find the largest contour (the sign body),
-        and simplify it to exactly 4 corners via approxPolyDP on its convex
-        hull.  approxPolyDP naturally handles trapezoidal / perspective shapes
-        and rounded sign corners far better than minAreaRect (which tries to
-        minimise area and can introduce unwanted rotation).
+    This is intentionally bbox-only (no blue HSV detection).  HSV-based
+    approaches are sensitive to sky colour, tree shadows, and adjacent sign
+    panels that bleed into the crop, and can produce wildly wrong corners
+    (bowtie / crossed quads).  The bbox union approach is deterministic and
+    robust across all lighting conditions.
 
     Returns 4 corner dicts in [TL, TR, BR, BL] order, or None on failure.
     """
@@ -207,7 +202,6 @@ def detect_sign_quad_from_detections(
     if not all_preds:
         return None
 
-    # --- Phase 1: ROI from all detection point coordinates ---
     xs: list[float] = []
     ys: list[float] = []
     for pred in all_preds:
@@ -229,68 +223,22 @@ def detect_sign_quad_from_detections(
     det_w = max(det_x2 - det_x1, 1)
     det_h = max(det_y2 - det_y1, 1)
 
-    mx = int(det_w * roi_expand)
-    my = int(det_h * roi_expand)
-    roi_x1 = max(0,     int(det_x1) - mx)
-    # Expand LESS upward: the sign border is thin (~10% of height) but
-    # adjacent exit signs live just above and get pulled in by a large expansion.
-    roi_y1 = max(0,     int(det_y1) - my // 2)
-    roi_x2 = min(img_w, int(det_x2) + mx)
-    roi_y2 = min(img_h, int(det_y2) + my)
+    # Expand outward to include the sign border and header text.
+    # Use more vertical padding upward (header row) than downward (bottom border only).
+    pad_x  = det_w * 0.12
+    pad_yd = det_h * 0.10   # downward — just the bottom border
+    pad_yu = det_h * 0.35   # upward   — header + top border (GAS/FOOD row is usually ~35% from top)
 
-    roi = img_bgr[roi_y1:roi_y2, roi_x1:roi_x2]
-    if roi.size == 0:
-        return None
+    q_x1 = max(0.0,     det_x1 - pad_x)
+    q_y1 = max(0.0,     det_y1 - pad_yu)
+    q_x2 = min(float(img_w), det_x2 + pad_x)
+    q_y2 = min(float(img_h), det_y2 + pad_yd)
 
-    # --- Phase 2: blue-edge detection inside the ROI ---
-    # Permissive thresholds are fine here — sky / trees are outside the crop.
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(
-        hsv,
-        np.array([85,  50,  25], dtype=np.uint8),
-        np.array([135, 255, 255], dtype=np.uint8),
+    corners = np.array(
+        [[q_x1, q_y1], [q_x2, q_y1], [q_x2, q_y2], [q_x1, q_y2]],
+        dtype=np.float32,
     )
-
-    # Open first to break thin pixel bridges between adjacent sign panels
-    # (e.g. EXIT sign above the main panel), then close to fill internal gaps.
-    ko = np.ones((7, 7),   np.uint8)
-    kc = np.ones((15, 15), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  ko)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kc)
-
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-
-    # The main sign panel is the largest blue region by area.
-    # After the opening step, adjacent smaller panels (EXIT sign etc.) are
-    # separate contours and will be smaller.
-    best_cnt = max(contours, key=cv2.contourArea)
-    if cv2.contourArea(best_cnt) < 0.04 * roi.shape[0] * roi.shape[1]:
-        return None
-
-    # approxPolyDP on the convex hull to get clean 4-corner polygon.
-    # This handles trapezoids (perspective) and rounded corners much better
-    # than minAreaRect, which can introduce spurious rotation.
-    hull = cv2.convexHull(best_cnt)
-    peri = cv2.arcLength(hull, True)
-    quad_pts: np.ndarray | None = None
-    for eps_frac in [0.02, 0.04, 0.06, 0.08, 0.10, 0.13, 0.16, 0.20, 0.25]:
-        approx = cv2.approxPolyDP(hull, eps_frac * peri, True)
-        if len(approx) == 4:
-            quad_pts = approx.reshape(-1, 2).astype(np.float32)
-            break
-
-    if quad_pts is None:
-        # Fallback: minAreaRect if approxPolyDP never converges to 4 pts
-        rect = cv2.minAreaRect(hull)
-        quad_pts = cv2.boxPoints(rect).astype(np.float32)
-
-    # Translate from ROI-local → full-image coordinates
-    quad_pts[:, 0] += roi_x1
-    quad_pts[:, 1] += roi_y1
-
-    return _four_extreme_hull_points(quad_pts)
+    return _four_extreme_hull_points(corners)
 
 
 def simplify_polygon_to_quad(points: list[dict]) -> list[dict] | None:
