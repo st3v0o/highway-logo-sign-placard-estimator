@@ -127,8 +127,16 @@ def detect_sign_quad_from_blue(img_bgr: np.ndarray) -> list[dict] | None:
     if cv2.contourArea(largest) < 0.05 * img_area:
         return None
 
-    pts_list = [{"x": float(p[0][0]), "y": float(p[0][1])} for p in largest]
-    return simplify_polygon_to_quad(pts_list)
+    # Use the minimum-area bounding rectangle of the convex hull.
+    # This is far more stable than approxPolyDP for rectangular signs: it directly
+    # captures the sign's overall orientation rather than picking 4 arbitrary points
+    # on an irregular contour, so the resulting homography doesn't introduce a
+    # spurious rotation into the grid lines.
+    hull = cv2.convexHull(largest)
+    rect = cv2.minAreaRect(hull)
+    box_pts = cv2.boxPoints(rect).astype(np.float32)   # 4 corners of min-area rect
+    ordered = order_points(box_pts)                     # → TL, TR, BR, BL
+    return [{"x": float(p[0]), "y": float(p[1])} for p in ordered]
 
 
 def simplify_polygon_to_quad(points: list[dict]) -> list[dict] | None:
