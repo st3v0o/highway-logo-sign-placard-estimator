@@ -216,6 +216,14 @@ def draw_sign_corner_grid(
     br = np.float32([sign_quad[2]["x"], sign_quad[2]["y"]])
     bl = np.float32([sign_quad[3]["x"], sign_quad[3]["y"]])
 
+    # Build a filled polygon mask so grid lines are clipped strictly inside
+    # the sign boundary — corners that stray into sky or trees won't pull
+    # grid lines outside the sign.
+    h_img, w_img = img.shape[:2]
+    quad_poly = np.array([tl, tr, br, bl], dtype=np.int32)
+    clip_mask = np.zeros((h_img, w_img), dtype=np.uint8)
+    cv2.fillPoly(clip_mask, [quad_poly], 255)
+
     overlay = img.copy()
     for i in range(cols + 1):
         t = i / cols
@@ -229,8 +237,12 @@ def draw_sign_corner_grid(
                  tuple((tl + t * (bl - tl)).astype(int)),
                  tuple((tr + t * (br - tr)).astype(int)),
                  COLOR_GRID, 1, cv2.LINE_AA)
-    cv2.addWeighted(overlay, alpha, img, 1.0 - alpha, 0, img)
-    return img
+
+    # Blend inside the quad only; leave pixels outside untouched
+    blended = cv2.addWeighted(overlay, alpha, img, 1.0 - alpha, 0)
+    out = img.copy()
+    out[clip_mask > 0] = blended[clip_mask > 0]
+    return out
 
 
 def render_annotated_image(
