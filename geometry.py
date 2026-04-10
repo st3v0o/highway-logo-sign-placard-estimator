@@ -150,19 +150,25 @@ def detect_sign_quad_from_blue(
     mask = cv2.morphologyEx(mask_open_only, cv2.MORPH_CLOSE, k_close)
 
     # ── Sky-from-top suppression ──────────────────────────────────────────────
-    # On images taken against a vivid blue sky, the HSV ranges can overlap with
-    # sign blue.  Remove sky rows by scanning downward from the image top: any
-    # row where more than 50 % of pixels are blue is classified as sky/EXIT-sign
-    # and zeroed out.  We stop as soon as we find a clearly non-blue row
-    # (< 20 % blue), which marks the start of the sign's white border.
-    _top_scan = int(0.18 * work_h)
-    _sky_end  = 0
+    # On images taken against a vivid blue sky the HSV ranges can overlap with
+    # sign blue.  Remove sky rows by scanning downward from the image top.
+    # Guard: only activate if high-density blue appears within the TOPMOST 5 %
+    # of the image.  On close-up / telephoto shots the sign fills the frame and
+    # its own blue body rises above 50 % density; those sign-top rows must NOT
+    # be cropped.  Real sky always appears from the very first rows.
+    _top_scan   = int(0.18 * work_h)
+    _sky_guard  = max(1, int(0.05 * work_h))   # blue must appear THIS early
+    _sky_end    = 0
+    _sky_active = False
     for _ri in range(_top_scan):
         _d = float(mask[_ri, :].sum()) / 255.0 / _work_width
         if _d > 0.50:
-            _sky_end = _ri + 1      # extend the crop boundary
+            if _ri < _sky_guard:        # blue appears very early → real sky
+                _sky_active = True
+            if _sky_active:
+                _sky_end = _ri + 1      # extend the crop boundary
         elif _d < 0.20 and _sky_end > 0:
-            break                   # confirmed white-border/gap row → stop
+            break                       # gap/white-border row → stop
     if _sky_end > 0:
         mask[:_sky_end, :]           = 0
         mask_open_only[:_sky_end, :] = 0
@@ -317,16 +323,30 @@ def detect_sign_quad_from_blue(
                     if peak_d > 0.20 and min_d < 0.10 * peak_d:
                         has_header_gap = True
 
+            # Proximity-based cluster of topmost h_segs.
+            # Problem: on close-up shots (e.g. lodging sign filling the frame)
+            # nearly ALL h_segs are at the sign's bottom edge; blindly taking
+            # the top-N pulls bottom segments into the fit.  Solution: only
+            # include segments within 15 % of bbox height of the topmost one.
+            _top_prox = max(30.0, 0.15 * bh)
+            if h_sorted:
+                _t0 = mid_y(h_sorted[0])
+                _top_cluster = [s for s in h_sorted
+                                if mid_y(s) <= _t0 + _top_prox]
+                _top_cluster = (_top_cluster or h_sorted)[:max(k_h, 3)]
+            else:
+                _top_cluster = []
+
             if has_header_gap:
                 # EXIT/GAS header above main sign → skip header, find main top
                 top_segs = _band_pick(h_sorted,
                                       by + 0.15 * bh, by + 0.60 * bh,
                                       mid_y, take_top=True)
                 if top_segs is None:
-                    top_segs = h_sorted[:max(k_h, 3)]
+                    top_segs = _top_cluster
             else:
-                # Unified sign: topmost Hough segments are the genuine sign top
-                top_segs = h_sorted[:max(k_h, 3)]
+                # Unified sign: use topmost proximity cluster
+                top_segs = _top_cluster
 
             # BOTTOM: use a density-minimum scan on the blue mask to locate the
             # sign panel's actual bottom edge.
@@ -404,6 +424,38 @@ def detect_sign_quad_from_blue(
             if right_segs is None:
                 right_segs = v_sorted[-k_v:]
 
+            # Hull-based top edge: fit a line through the topmost convex hull
+            # points.  This captures the sign's perspective top edge correctly
+            # even when Hough top segments are concentrated on one horizontal
+            # side of the sign (common on angled/telephoto multi-panel shots).
+            hull_pts_arr = cv2.convexHull(best_cnt).reshape(-1, 2).astype(np.float32)
+            hull_top_y0  = float(hull_pts_arr[:, 1].min())
+            hull_top_pts = hull_pts_arr[
+                hull_pts_arr[:, 1] <= hull_top_y0 + max(20.0, 0.10 * bh)]
+            hull_top_line = None
+            if len(hull_top_pts) >= 2:
+                fl_h = cv2.fitLine(hull_top_pts.reshape(-1, 1, 2),
+                                   cv2.DIST_L2, 0, 0.01, 0.01).flatten()
+                vx_h, vy_h = float(fl_h[0]), float(fl_h[1])
+                cx_h, cy_h = float(fl_h[2]), float(fl_h[3])
+                a_h, b_h   = -vy_h, vx_h
+                c_h        = vy_h * cx_h - vx_h * cy_h
+                n_h        = max(float(np.sqrt(a_h*a_h + b_h*b_h)), 1e-9)
+                hull_top_line = (a_h/n_h, b_h/n_h, c_h/n_h)
+
+            # Decide whether to trust Hough top or defer to hull top.
+            # Use hull top when the Hough cluster is spatially biased
+            # (all segments concentrated in the left or right half only).
+            _use_hull_top = False
+            if top_segs and hull_top_line is not None:
+                _top_xs = [(s[0]+s[2])/2 for s in top_segs]
+                _mid_bx = bx + 0.5 * bw
+                # Biased if every segment is on one side of the sign's midline
+                _use_hull_top = (
+                    all(x < _mid_bx for x in _top_xs) or
+                    all(x > _mid_bx for x in _top_xs)
+                )
+
             # Fit one line per edge and intersect opposite pairs
             def fit_abc_local(s_list):
                 pts = np.array([[(s[0]+s[2])/2, (s[1]+s[3])/2] for s in s_list],
@@ -429,7 +481,9 @@ def detect_sign_quad_from_blue(
                 return ((-c1*b2 + c2*b1) / det,
                         (-a1*c2 + a2*c1) / det)
 
-            top   = fit_abc_local(top_segs)
+            top   = hull_top_line if _use_hull_top else fit_abc_local(top_segs)
+            if top is None:
+                top = fit_abc_local(top_segs)
             bot   = fit_abc_local(bot_segs)
             left  = fit_abc_local(left_segs)
             right = fit_abc_local(right_segs)
