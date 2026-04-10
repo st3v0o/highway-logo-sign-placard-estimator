@@ -363,8 +363,8 @@ def _hough_to_quad(
             a, b = float(y2 - y1), float(x1 - x2)
             c = float(x2 * y1 - x1 * y2)
         else:
-            vx, vy, cx, cy = [float(v) for v in
-                               cv2.fitLine(pts.reshape(-1, 1, 2), cv2.DIST_L2, 0, 0.01, 0.01)]
+            _fl = cv2.fitLine(pts.reshape(-1, 1, 2), cv2.DIST_L2, 0, 0.01, 0.01).flatten()
+            vx, vy, cx, cy = float(_fl[0]), float(_fl[1]), float(_fl[2]), float(_fl[3])
             a, b = -vy, vx
             c = vy * cx - vx * cy   # NOT cy*vy - cx*vx (that swaps cx/cy roles)
         n = max(float(np.sqrt(a * a + b * b)), 1e-9)
