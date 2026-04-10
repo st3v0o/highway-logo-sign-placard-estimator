@@ -617,10 +617,16 @@ def _detect_quad_border(
     iw = cv2.resize(img_bgr, (ww, wh), interpolation=cv2.INTER_AREA)
 
     gray = cv2.cvtColor(iw, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 1.0)
+
+    # CLAHE contrast enhancement: boosts the sign's white border relative to
+    # sky/background before Canny, mimicking the GIMP edge+contrast workflow.
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    gray_enh = clahe.apply(gray)
+
+    blur = cv2.GaussianBlur(gray_enh, (5, 5), 1.0)
     med  = float(np.median(blur))
-    lo   = max(10, int(0.50 * med))
-    hi   = min(255, int(1.50 * med))
+    lo   = max(10, int(0.40 * med))
+    hi   = min(255, int(1.40 * med))
     edges = cv2.Canny(blur, lo, hi)
     edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
 
@@ -743,6 +749,90 @@ def _detect_quad_adaptive(
             for p in [tl, tr, br, bl]]
 
 
+def _detect_quad_edge_contrast(
+    img_bgr: np.ndarray,
+    _work_width: int = 1000,
+) -> Optional[list[dict]]:
+    """
+    Approach 3b — GIMP-style edge-detect + high-contrast pipeline.
+
+    Mimics what the user demonstrated in GIMP:
+      1. Bilateral filter (edge-preserving denoise)
+      2. CLAHE (strong local contrast boost) — white sign border blazes
+         against a near-black background just like the GIMP result
+      3. Aggressive Canny (lower thresholds to catch all border segments)
+      4. Morphological close (bridge gaps in the sign border outline)
+      5. Find the largest rectangular contour whose interior is mostly blue
+
+    This is specifically tuned to detect the MAIN sign body as a clearly
+    outlined rectangle even when an EXIT cap sits above/adjacent to it.
+    """
+    h, w = img_bgr.shape[:2]
+    ww = _work_width
+    wh = int(h * ww / w)
+    iw = cv2.resize(img_bgr, (ww, wh), interpolation=cv2.INTER_AREA)
+
+    # Step 1: bilateral filter — smooth sign-body texture, keep white border
+    bil = cv2.bilateralFilter(iw, d=9, sigmaColor=75, sigmaSpace=75)
+    gray = cv2.cvtColor(bil, cv2.COLOR_BGR2GRAY)
+
+    # Step 2: CLAHE — ramp up local contrast so the white sign border
+    # becomes very bright against the dark sign body and sky
+    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
+    gray_c = clahe.apply(gray)
+
+    # Step 3: aggressive Canny (lower thresholds than default)
+    blur = cv2.GaussianBlur(gray_c, (3, 3), 0.8)
+    edges = cv2.Canny(blur, 20, 80)
+
+    # Step 4: close gaps in the border outline (sign border can be dashed by
+    # logo panels, text, or image compression)
+    k_close = np.ones((9, 9), np.uint8)
+    edges_closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, k_close)
+    edges_closed = cv2.dilate(edges_closed, np.ones((2, 2), np.uint8))
+
+    cnts, _ = cv2.findContours(edges_closed, cv2.RETR_EXTERNAL,
+                                cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+
+    hsv = cv2.cvtColor(iw, cv2.COLOR_BGR2HSV)
+    blue_loose = cv2.inRange(hsv, np.array([90, 60, 30]),
+                                   np.array([130, 255, 195]))
+
+    best_score  = 0.0
+    best_result = None
+
+    for cnt in cnts:
+        if cv2.contourArea(cnt) < 0.03 * ww * wh:
+            continue
+        hull     = cv2.convexHull(cnt)
+        quad_pts = _approx_to_quad(hull)
+        if quad_pts is None:
+            continue
+        if not cv2.isContourConvex(
+                quad_pts.reshape(-1, 1, 2).astype(np.int32)):
+            continue
+        qmask = np.zeros((wh, ww), np.uint8)
+        cv2.fillPoly(qmask, [quad_pts.astype(np.int32)], 255)
+        inside = max(float(qmask.sum()) / 255.0, 1.0)
+        blue_frac = float((blue_loose & qmask).sum()) / 255.0 / inside
+        if blue_frac < 0.30:   # slightly looser than border method (0.35)
+            continue
+        score = _score_quad(quad_pts, blue_loose, ww, wh)
+        if score > best_score and score > 0.03:
+            best_score  = score
+            best_result = quad_pts
+
+    if best_result is None:
+        return None
+
+    tl, tr, br, bl = _order_quad_corners(best_result)
+    scale = w / ww
+    return [{"x": float(p[0] * scale), "y": float(p[1] * scale)}
+            for p in [tl, tr, br, bl]]
+
+
 def detect_sign_quad(
     img_bgr: np.ndarray,
     _work_width: int = 1000,
@@ -778,8 +868,9 @@ def detect_sign_quad(
     q_border   = _detect_quad_border(img_bgr, _work_width)
     q_adaptive = _detect_quad_adaptive(img_bgr, _work_width)
     q_hough    = detect_sign_quad_from_blue(img_bgr, _work_width=_work_width)
+    q_edge     = _detect_quad_edge_contrast(img_bgr, _work_width)
 
-    for q in [q_border, q_adaptive, q_hough]:
+    for q in [q_border, q_adaptive, q_hough, q_edge]:
         if q is not None:
             pts_w = _to_working(q)
             sc    = _score_quad(pts_w, blue_loose, ww, wh)
