@@ -192,9 +192,6 @@ def draw_sign_quad(
         [[int(round(p["x"])), int(round(p["y"]))] for p in sign_quad],
         dtype=np.int32,
     )
-    cv2.polylines(img, [quad_pts], isClosed=True, color=COLOR_PERSP_QUAD, thickness=4)
-    for pt in quad_pts:
-        cv2.circle(img, tuple(pt), 10, COLOR_PERSP_QUAD, -1)
     return img
 
 

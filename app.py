@@ -349,10 +349,6 @@ def _run_grid_on_image(pil_image: Image.Image, sign_id: str) -> dict:
     vis_bgr = bgr.copy()
     if quad:
         vis_bgr = draw_sign_corner_grid(vis_bgr, quad)
-        pts = np.array([[int(p["x"]), int(p["y"])] for p in quad], dtype=np.int32)
-        cv2.polylines(vis_bgr, [pts], True, (0, 255, 255), 3)
-        for p in quad:
-            cv2.circle(vis_bgr, (int(p["x"]), int(p["y"])), 10, (0, 0, 255), -1)
         status = "Corners: " + ", ".join(f"({p['x']:.0f},{p['y']:.0f})" for p in quad)
     else:
         status = None
