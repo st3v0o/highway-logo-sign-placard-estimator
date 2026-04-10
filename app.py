@@ -431,7 +431,13 @@ if "results_list" in st.session_state and st.session_state["results_list"]:
         if item.get("mock_mode"):
             st.info("Mock Mode is ON — using sample predictions (no API call made).")
 
-        image_bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR) if perspective_mode else None
+        # Need image_bgr for blue-pixel sign boundary when either
+        # perspective mode or grid mode is active.
+        image_bgr = (
+            cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            if (perspective_mode or grid_mode)
+            else None
+        )
 
         results = estimate_total_capacity(
             empty_space_predictions=empty_preds_filtered,
@@ -459,6 +465,7 @@ if "results_list" in st.session_state and st.session_state["results_list"]:
             min_confidence=0.0,
             grid=results.get("grid"),
             sign_quad=results.get("sign_quad"),
+            draw_sign_grid=grid_mode,
         )
 
         col_img, col_stats = st.columns([3, 1])

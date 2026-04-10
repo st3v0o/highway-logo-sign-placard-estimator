@@ -526,26 +526,23 @@ def estimate_total_capacity(
     # ---------------------------------------------------------------
     sign_quad: list[dict] | None = None
     sign_homography: tuple | None = None
-    if perspective_mode:
-        if image_bgr is not None:
-            # Primary: use the inference results to crop a tight ROI so that
-            # background sky / trees / adjacent signs are excluded before the
-            # blue-pixel pass runs.  This is far more robust than running the
-            # colour threshold on the full image.
-            # Fallback: full-image colour detection (useful if predictions are empty).
-            all_preds = (
-                [p for p in placard_predictions if p.get("confidence", 0) >= min_confidence]
-                + [p for p in empty_space_predictions if p.get("confidence", 0) >= min_confidence]
+    # Compute the blue-pixel sign boundary whenever perspective OR grid mode is
+    # active — grid mode needs it to draw the same corner-based grid as the
+    # Generate Grid button.
+    if (perspective_mode or grid_mode) and image_bgr is not None:
+        all_preds = (
+            [p for p in placard_predictions if p.get("confidence", 0) >= min_confidence]
+            + [p for p in empty_space_predictions if p.get("confidence", 0) >= min_confidence]
+        )
+        if all_preds:
+            sign_quad = detect_sign_quad_from_detections(
+                image_bgr, placard_predictions, empty_space_predictions
             )
-            if all_preds:
-                sign_quad = detect_sign_quad_from_detections(
-                    image_bgr, placard_predictions, empty_space_predictions
-                )
-            if sign_quad is None:
-                sign_quad = detect_sign_quad_from_blue(image_bgr)
-        if sign_quad is not None:
-            H_s, H_s_inv, dst_w_s, dst_h_s = compute_region_homography(sign_quad)
-            sign_homography = (H_s, H_s_inv, dst_w_s, dst_h_s)
+        if sign_quad is None:
+            sign_quad = detect_sign_quad_from_blue(image_bgr)
+    if perspective_mode and sign_quad is not None:
+        H_s, H_s_inv, dst_w_s, dst_h_s = compute_region_homography(sign_quad)
+        sign_homography = (H_s, H_s_inv, dst_w_s, dst_h_s)
 
     # ---------------------------------------------------------------
     # Infer the grid from existing placard positions (once, globally).

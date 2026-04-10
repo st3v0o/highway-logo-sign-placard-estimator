@@ -198,6 +198,41 @@ def draw_sign_quad(
     return img
 
 
+def draw_sign_corner_grid(
+    img: np.ndarray,
+    sign_quad: list[dict],
+    cols: int = 10,
+    rows: int = 6,
+    alpha: float = 0.45,
+) -> np.ndarray:
+    """
+    Draw a bilinear perspective grid subdividing the sign boundary into
+    cols × rows cells — identical to the Generate Grid visualisation.
+
+    sign_quad: [TL, TR, BR, BL] dicts with 'x' and 'y' keys.
+    """
+    tl = np.float32([sign_quad[0]["x"], sign_quad[0]["y"]])
+    tr = np.float32([sign_quad[1]["x"], sign_quad[1]["y"]])
+    br = np.float32([sign_quad[2]["x"], sign_quad[2]["y"]])
+    bl = np.float32([sign_quad[3]["x"], sign_quad[3]["y"]])
+
+    overlay = img.copy()
+    for i in range(cols + 1):
+        t = i / cols
+        cv2.line(overlay,
+                 tuple((tl + t * (tr - tl)).astype(int)),
+                 tuple((bl + t * (br - bl)).astype(int)),
+                 COLOR_GRID, 1, cv2.LINE_AA)
+    for j in range(rows + 1):
+        t = j / rows
+        cv2.line(overlay,
+                 tuple((tl + t * (bl - tl)).astype(int)),
+                 tuple((tr + t * (br - tr)).astype(int)),
+                 COLOR_GRID, 1, cv2.LINE_AA)
+    cv2.addWeighted(overlay, alpha, img, 1.0 - alpha, 0, img)
+    return img
+
+
 def render_annotated_image(
     pil_image: Image.Image,
     placard_predictions: list[dict],
@@ -206,9 +241,14 @@ def render_annotated_image(
     min_confidence: float = 0.0,
     grid: dict | None = None,
     sign_quad: list[dict] | None = None,
+    draw_sign_grid: bool = False,
 ) -> Image.Image:
     """
     Compose all overlays onto the image and return a PIL Image.
+
+    draw_sign_grid: when True and sign_quad is available, draws the same
+        bilinear 10×6 perspective grid as the Generate Grid button — derived
+        from the sign boundary corners rather than from detected placard positions.
 
     Drawing order: grid lines → sign quad → empty regions → existing placards
     → proposed placements, so proposals always appear on top.
@@ -216,7 +256,9 @@ def render_annotated_image(
     img_rgb = np.array(pil_image.convert("RGB"))
     img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
-    if grid:
+    if draw_sign_grid and sign_quad:
+        img = draw_sign_corner_grid(img, sign_quad)
+    elif grid:
         img = draw_grid_lines(
             img,
             grid["row_centers"],
