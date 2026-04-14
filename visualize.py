@@ -159,13 +159,17 @@ def render_annotated_image(
     per_region: list[dict],
     min_confidence: float = 0.0,
     sign_quad: list[dict] | None = None,
+    sign_polygon: list[dict] | None = None,
 ) -> Image.Image:
     """
     Compose all overlays onto the image and return a PIL Image.
 
+    sign_quad    – exactly 4 corners [TL, TR, BR, BL], used for the perspective grid
+    sign_polygon – raw model polygon (all points), used for the yellow outline
+
     Drawing order:
       1. Perspective grid (if sign_quad detected)
-      2. Sign boundary outline
+      2. Sign boundary outline (raw model polygon)
       3. Empty regions
       4. Existing placards
       5. Proposed placements (on top)
@@ -175,7 +179,10 @@ def render_annotated_image(
 
     if sign_quad:
         img = draw_sign_corner_grid(img, sign_quad)
-        img = draw_sign_quad(img, sign_quad)
+
+    outline_pts = sign_polygon or sign_quad
+    if outline_pts:
+        img = draw_sign_quad(img, outline_pts)
 
     img = draw_empty_regions(img, empty_space_predictions, min_confidence)
     img = draw_placards(img, placard_predictions, min_confidence)

@@ -65,22 +65,35 @@ def prediction_to_mask(pred: dict, img_h: int, img_w: int) -> tuple[np.ndarray, 
     return bbox_to_mask(x1, y1, x2, y2, img_h, img_w), False
 
 
-def sign_quad_from_pred(pred: dict) -> list[dict]:
+def sign_polygon_from_pred(pred: dict) -> list[dict]:
     """
-    Convert a Blue-Logo-Sign detection to a [TL, TR, BR, BL] quad.
-
-    Uses polygon points if the model provides them (better perspective accuracy),
-    otherwise falls back to the axis-aligned bounding box corners.
+    Return the raw polygon points from a Blue-Logo-Sign detection exactly as the
+    model provided them. Falls back to bbox corners when no polygon is present.
+    Used for drawing the sign outline overlay.
     """
     points = pred.get("points")
-    if points and len(points) == 4:
-        return _four_extreme_hull_points(
-            np.array([[p["x"], p["y"]] for p in points], dtype=np.float32)
-        )
-    if points and len(points) > 4:
-        simplified = simplify_polygon_to_quad(points)
-        if simplified:
-            return simplified
+    if points and len(points) >= 3:
+        return [{"x": float(p["x"]), "y": float(p["y"])} for p in points]
+    x1, y1, x2, y2 = bbox_to_xyxy(pred)
+    return [
+        {"x": float(x1), "y": float(y1)},
+        {"x": float(x2), "y": float(y1)},
+        {"x": float(x2), "y": float(y2)},
+        {"x": float(x1), "y": float(y2)},
+    ]
+
+
+def sign_quad_from_pred(pred: dict) -> list[dict]:
+    """
+    Convert a Blue-Logo-Sign detection to a [TL, TR, BR, BL] quad of exactly
+    4 corners, required for the perspective homography.
+
+    Extracts the 4 extreme corners from the model's polygon (or bbox).
+    """
+    points = pred.get("points")
+    if points and len(points) >= 3:
+        pts = np.array([[p["x"], p["y"]] for p in points], dtype=np.float32)
+        return _four_extreme_hull_points(pts)
 
     x1, y1, x2, y2 = bbox_to_xyxy(pred)
     return [

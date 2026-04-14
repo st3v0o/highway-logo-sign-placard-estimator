@@ -20,6 +20,7 @@ from geometry import (
     compute_region_homography,
     simplify_polygon_to_quad,
     sign_quad_from_pred,
+    sign_polygon_from_pred,
 )
 
 
@@ -221,8 +222,10 @@ def estimate_total_capacity(
 
     # Build the global sign homography once
     sign_quad: list[dict] | None = None
+    sign_polygon: list[dict] | None = None
     sign_homography: tuple | None = None
     if sign_prediction is not None:
+        sign_polygon = sign_polygon_from_pred(sign_prediction)
         sign_quad = sign_quad_from_pred(sign_prediction)
         H_s, H_s_inv, dst_w_s, dst_h_s = compute_region_homography(sign_quad)
         sign_homography = (H_s, H_s_inv, dst_w_s, dst_h_s)
@@ -277,4 +280,5 @@ def estimate_total_capacity(
         "placard_h":             placard_h,
         "used_perspective_mode": any_perspective,
         "sign_quad":             sign_quad,
+        "sign_polygon":          sign_polygon,
     }

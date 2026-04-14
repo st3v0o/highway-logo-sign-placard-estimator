@@ -256,6 +256,7 @@ def _run_fitting(
         per_region=results["per_region"],
         min_confidence=0.0,
         sign_quad=results.get("sign_quad"),
+        sign_polygon=results.get("sign_polygon"),
     )
     annotated_bytes = _to_jpeg_bytes(annotated_rgb)
     return annotated_bytes, results
