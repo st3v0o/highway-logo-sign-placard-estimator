@@ -198,6 +198,30 @@ def sign_quad_from_polygon(polygon: list[dict]) -> list[dict]:
     return _four_extreme_hull_points(pts)
 
 
+def sign_quad_for_homography(pred: dict) -> list[dict]:
+    """
+    Derive the 4-corner sign quad for use in perspective homography.
+
+    Applies spike removal to eliminate exit-panel protrusions, but deliberately
+    skips Laplacian smoothing so real sign corners retain their accurate pixel
+    positions.  Smoothing rounds corners inward, corrupting the homography.
+    """
+    points = pred.get("points")
+    if points and len(points) >= 3:
+        pts = np.array([[p["x"], p["y"]] for p in points], dtype=np.float32)
+        pts = _resample_polygon(pts, n=80)
+        pts = _remove_polygon_spikes(pts, min_angle_deg=60.0)
+        # No Laplacian smoothing — preserves corner accuracy
+        return _four_extreme_hull_points(pts)
+    x1, y1, x2, y2 = bbox_to_xyxy(pred)
+    return [
+        {"x": float(x1), "y": float(y1)},
+        {"x": float(x2), "y": float(y1)},
+        {"x": float(x2), "y": float(y2)},
+        {"x": float(x1), "y": float(y2)},
+    ]
+
+
 def simplify_polygon_to_quad(points: list[dict]) -> list[dict] | None:
     """
     Reduce an arbitrary polygon to exactly 4 corner points via convex hull + approxPolyDP.

@@ -21,6 +21,7 @@ from geometry import (
     simplify_polygon_to_quad,
     sign_quad_from_pred,
     sign_quad_from_polygon,
+    sign_quad_for_homography,
     sign_polygon_from_pred,
 )
 
@@ -298,14 +299,12 @@ def estimate_placard_size_from_detections(
                 [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32
             ).reshape(-1, 1, 2)
             flat = cv2.perspectiveTransform(corners, H).reshape(-1, 2)
-            mw = float(max(
-                np.linalg.norm(flat[1] - flat[0]),
-                np.linalg.norm(flat[2] - flat[3]),
-            ))
-            mh = float(max(
-                np.linalg.norm(flat[3] - flat[0]),
-                np.linalg.norm(flat[2] - flat[1]),
-            ))
+            # Use axis-aligned extents in flat (sign) space.
+            # The bbox corners may warp to a tilted quad when the sign is
+            # viewed at an angle; the true sign-space dimensions are the
+            # axis-aligned width and height of that quad's bounding box.
+            mw = float(flat[:, 0].max() - flat[:, 0].min())
+            mh = float(flat[:, 1].max() - flat[:, 1].min())
         else:
             mw, mh = float(pw), float(ph)
 
@@ -364,9 +363,10 @@ def estimate_total_capacity(
     sign_homography: tuple | None = None
     if sign_prediction is not None:
         sign_polygon = sign_polygon_from_pred(sign_prediction)
-        # Derive the quad from the already-smoothed polygon so the homography
-        # and the yellow outline both use the same boundary.
-        sign_quad = sign_quad_from_polygon(sign_polygon)
+        # Use spike-removal-only (no Laplacian smoothing) for the homography quad
+        # so sign corners stay at their true pixel positions.
+        # Laplacian smoothing rounds corners inward, corrupting the warp.
+        sign_quad = sign_quad_for_homography(sign_prediction)
         H_s, H_s_inv, dst_w_s, dst_h_s = compute_region_homography(sign_quad)
         sign_homography = (H_s, H_s_inv, dst_w_s, dst_h_s)
 
