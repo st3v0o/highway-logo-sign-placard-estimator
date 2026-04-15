@@ -160,27 +160,34 @@ def draw_sign_corner_grid(
         cx = fw / 2.0
         cy = fh / 2.0
 
-        # Build lists of line positions by expanding outward from the anchor
-        def _expand(origin: float, step: float, limit: int) -> list[int]:
+        # Build lists of line positions by expanding outward from the anchor.
+        # max_hops caps how many steps are taken in each direction.
+        def _expand(origin: float, step: float, limit: int, max_hops=None) -> list[int]:
             positions = []
-            pos = origin
-            while pos <= limit:
+            pos, hop = origin, 0
+            while pos <= limit and (max_hops is None or hop <= max_hops):
                 positions.append(int(round(pos)))
-                pos += step
-            pos = origin - step
-            while pos >= 0:
+                pos += step; hop += 1
+            pos, hop = origin - step, 1
+            while pos >= 0 and (max_hops is None or hop <= max_hops):
                 positions.append(int(round(pos)))
-                pos -= step
+                pos -= step; hop += 1
             return sorted(set(positions))
 
-        # Minimum spacing: vertical ≥ smallest detected placard width,
-        # horizontal ≥ half that.
+        # Step stays locked to placard-to-centre distance (never changed —
+        # that would move the grid off the existing placard).
+        step_x = max(abs(xp - cx), 1.0)
+        step_y = max(abs(yp - cy), 1.0)
+        # Minimum spacing controls *extension* only, not the step itself.
+        # If the step is below the minimum, cap to ±1 hop → 3 symmetric lines.
         _min_pw = float(
             min((p["width"] for p in placard_predictions), default=0)
             or (grid_w if grid_w and grid_w > 0 else (placard_w or 1))
         )
-        xs = _expand(cx, max(abs(xp - cx), _min_pw), fw)
-        ys = _expand(cy, max(abs(yp - cy), _min_pw / 2.0), fh)
+        max_hops_x = None if step_x >= _min_pw       else 1
+        max_hops_y = None if step_y >= _min_pw / 2.0 else 1
+        xs = _expand(cx, step_x, fw,  max_hops=max_hops_x)
+        ys = _expand(cy, step_y, fh, max_hops=max_hops_y)
     else:
         # Fallback: uniform 10 × 6 grid
         xs = [int(i * fw / 10) for i in range(11)]
@@ -253,26 +260,30 @@ def render_flat_annotated_image(
         cx = dst_w / 2.0
         cy = dst_h / 2.0
 
-        def _expand(origin: float, step: float, limit: int) -> list[int]:
+        def _expand(origin: float, step: float, limit: int, max_hops=None) -> list[int]:
             positions: list[int] = []
-            pos = origin
-            while pos <= limit:
+            pos, hop = origin, 0
+            while pos <= limit and (max_hops is None or hop <= max_hops):
                 positions.append(int(round(pos)))
-                pos += step
-            pos = origin - step
-            while pos >= 0:
+                pos += step; hop += 1
+            pos, hop = origin - step, 1
+            while pos >= 0 and (max_hops is None or hop <= max_hops):
                 positions.append(int(round(pos)))
-                pos -= step
+                pos -= step; hop += 1
             return sorted(set(positions))
 
-        # Minimum spacing: vertical ≥ smallest detected placard width,
-        # horizontal ≥ half that.
+        # Step locked to placard-to-centre distance so the grid line always
+        # lands on the existing placard.  Minimum spacing rule caps extension.
+        step_x = max(abs(xp - cx), 1.0)
+        step_y = max(abs(yp - cy), 1.0)
         _min_pw = float(
             min((p["width"] for p in placard_predictions), default=0)
             or (grid_w if grid_w and grid_w > 0 else (placard_w or 1))
         )
-        xs = _expand(cx, max(abs(xp - cx), _min_pw), dst_w)
-        ys = _expand(cy, max(abs(yp - cy), _min_pw / 2.0), dst_h)
+        max_hops_x = None if step_x >= _min_pw       else 1
+        max_hops_y = None if step_y >= _min_pw / 2.0 else 1
+        xs = _expand(cx, step_x, dst_w, max_hops=max_hops_x)
+        ys = _expand(cy, step_y, dst_h, max_hops=max_hops_y)
     else:
         xs = [int(i * dst_w / 10) for i in range(11)]
         ys = [int(j * dst_h / 6)  for j in range(7)]

@@ -126,17 +126,29 @@ def place_rectangles_in_region(
 # Perspective-aware placement
 # ---------------------------------------------------------------------------
 
-def _grid_lines(origin: float, step: int, limit: int) -> list[float]:
-    """Return all grid line positions within [0, limit] anchored at origin."""
+def _grid_lines(
+    origin: float,
+    step: float,
+    limit: int,
+    max_hops: int | None = None,
+) -> list[float]:
+    """Return grid line positions within [0, limit] anchored at origin.
+
+    max_hops caps how many steps are taken in each direction (None = unlimited).
+    """
     lines: list[float] = []
     pos = origin
-    while pos <= limit:
+    hop = 0
+    while pos <= limit and (max_hops is None or hop <= max_hops):
         lines.append(pos)
         pos += step
+        hop += 1
     pos = origin - step
-    while pos >= 0:
+    hop = 1
+    while pos >= 0 and (max_hops is None or hop <= max_hops):
         lines.append(pos)
         pos -= step
+        hop += 1
     return sorted(lines)
 
 
@@ -208,18 +220,21 @@ def place_rectangles_perspective_aware(
         # opposite edge, and one line at the centre — perfectly symmetric.
         cx = dst_w / 2.0
         cy = dst_h / 2.0
-        # Minimum spacing rules (user requirement):
-        #   vertical   ≥ smallest detected placard width
-        #   horizontal ≥ half that
+        # Step is ALWAYS the placard-to-centre distance — this is the only
+        # value that keeps a grid line exactly on the existing placard.
+        step_x = max(abs(xp - cx), 1.0)
+        step_y = max(abs(yp - cy), 1.0)
+        # Minimum spacing rules determine how far the grid *extends*, not the step.
+        # If step < min, cap to ±1 hop so only 3 lines appear (mirror / centre / placard).
         _min_pw = float(
             min((p["width"] for p in placard_predictions), default=0)
             or (grid_w if grid_w and grid_w > 0 else placard_w)
             or 1
         )
-        step_x = max(abs(xp - cx), _min_pw)
-        step_y = max(abs(yp - cy), _min_pw / 2.0)
-        grid_xs = _grid_lines(cx, step_x, dst_w)
-        grid_ys = _grid_lines(cy, step_y, dst_h)
+        max_hops_x = None if step_x >= _min_pw       else 1
+        max_hops_y = None if step_y >= _min_pw / 2.0 else 1
+        grid_xs = _grid_lines(cx, step_x, dst_w, max_hops=max_hops_x)
+        grid_ys = _grid_lines(cy, step_y, dst_h, max_hops=max_hops_y)
 
     quads: list[list[list[float]]] = []
 
