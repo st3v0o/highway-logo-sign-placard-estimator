@@ -217,12 +217,17 @@ def place_rectangles_perspective_aware(
         # Regular grid anchored at sign centre with minimum-spacing step.
         step_x = max(abs(xp - cx), _min_pw)
         step_y = max(abs(yp - cy), _min_pw / 2.0)
-        grid_xs = _grid_lines(cx, step_x, dst_w)
-        grid_ys = _grid_lines(cy, step_y, dst_h)
-        # Force-insert the exact placard position so a line always passes
-        # through the existing placard regardless of the regular step.
-        grid_xs = sorted(set(grid_xs + [xp]))
-        grid_ys = sorted(set(grid_ys + [yp]))
+        raw_xs = _grid_lines(cx, step_x, dst_w)
+        raw_ys = _grid_lines(cy, step_y, dst_h)
+        # Snap the nearest regular line to the exact placard centre so exactly
+        # one line passes through it (no extras added, no duplicate).
+        def _snap(lines, target):
+            if not lines:
+                return lines
+            nearest = min(lines, key=lambda v: abs(v - target))
+            return sorted(set([target if v == nearest else v for v in lines]))
+        grid_xs = _snap(raw_xs, xp)
+        grid_ys = _snap(raw_ys, yp)
 
     quads: list[list[list[float]]] = []
 

@@ -179,11 +179,17 @@ def draw_sign_corner_grid(
         )
         step_x = max(abs(xp - cx), _min_pw)
         step_y = max(abs(yp - cy), _min_pw / 2.0)
-        xs = _expand(cx, step_x, fw)
-        ys = _expand(cy, step_y, fh)
-        # Force-insert exact placard position — a line must always pass through it.
-        xs = sorted(set(xs + [int(round(xp))]))
-        ys = sorted(set(ys + [int(round(yp))]))
+        raw_xs = _expand(cx, step_x, fw)
+        raw_ys = _expand(cy, step_y, fh)
+        # Snap the nearest regular line to the exact placard centre — exactly
+        # one line through the placard, no extras.
+        def _snap(lines, target):
+            if not lines:
+                return lines
+            nearest = min(lines, key=lambda v: abs(v - target))
+            return sorted(set([target if v == nearest else v for v in lines]))
+        xs = _snap(raw_xs, int(round(xp)))
+        ys = _snap(raw_ys, int(round(yp)))
     else:
         # Fallback: uniform 10 × 6 grid
         xs = [int(i * fw / 10) for i in range(11)]
@@ -274,11 +280,15 @@ def render_flat_annotated_image(
         )
         step_x = max(abs(xp - cx), _min_pw)
         step_y = max(abs(yp - cy), _min_pw / 2.0)
-        xs = _expand(cx, step_x, dst_w)
-        ys = _expand(cy, step_y, dst_h)
-        # Force-insert exact placard position — a line must always pass through it.
-        xs = sorted(set(xs + [int(round(xp))]))
-        ys = sorted(set(ys + [int(round(yp))]))
+        raw_xs = _expand(cx, step_x, dst_w)
+        raw_ys = _expand(cy, step_y, dst_h)
+        def _snap(lines, target):
+            if not lines:
+                return lines
+            nearest = min(lines, key=lambda v: abs(v - target))
+            return sorted(set([target if v == nearest else v for v in lines]))
+        xs = _snap(raw_xs, int(round(xp)))
+        ys = _snap(raw_ys, int(round(yp)))
     else:
         xs = [int(i * dst_w / 10) for i in range(11)]
         ys = [int(j * dst_h / 6)  for j in range(7)]
