@@ -202,8 +202,14 @@ def place_rectangles_perspective_aware(
             [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
         ).reshape(-1, 1, 2)
         flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
-        xp = float(np.median(flat_centres[:, 0]))
-        yp = float(np.median(flat_centres[:, 1]))
+        # Anchor at the LEFTMOST detected placard (not the median).
+        # Using median-x when two placards are side-by-side puts the anchor
+        # between them, pushing every column out of bounds.  The leftmost
+        # placard gives a stable, sign-edge-relative anchor; subsequent columns
+        # land at xp + gw, xp + 2gw … which fills the sign naturally.
+        leftmost_idx = int(np.argmin(flat_centres[:, 0]))
+        xp = float(flat_centres[leftmost_idx, 0])
+        yp = float(np.median(flat_centres[:, 1]))   # median row is fine
         # Cell centres expand outward from the existing placard at cell-pitch intervals.
         grid_xs = _grid_lines(xp, gw, dst_w)
         grid_ys = _grid_lines(yp, gh, dst_h)
@@ -220,15 +226,16 @@ def place_rectangles_perspective_aware(
             for pp in placard_predictions:
                 px, py = pp.get("x", 0), pp.get("y", 0)
                 pw2, ph2 = pp.get("width", 0) / 2, pp.get("height", 0) / 2
-                # Expand each existing placard by the spacing buffer so proposed
-                # slots cannot land within `spacing` px of an occupied slot.
-                pw2s = pw2 + spacing
-                ph2s = ph2 + spacing
+                # Punch out exactly the existing placard footprint.
+                # Do NOT expand by spacing here — the spacing slider controls
+                # proposed-to-proposed gaps only (enforced after each placement
+                # below).  Expanding existing placards would eat into the cell
+                # immediately below/beside them, hiding valid empty slots.
                 box = np.array([
-                    [px - pw2s, py - ph2s],
-                    [px + pw2s, py - ph2s],
-                    [px + pw2s, py + ph2s],
-                    [px - pw2s, py + ph2s],
+                    [px - pw2, py - ph2],
+                    [px + pw2, py - ph2],
+                    [px + pw2, py + ph2],
+                    [px - pw2, py + ph2],
                 ], dtype=np.float32).reshape(-1, 1, 2)
                 flat_box = cv2.perspectiveTransform(box, H).reshape(-1, 2).astype(np.int32)
                 cv2.fillConvexPoly(available, flat_box, 0)

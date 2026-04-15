@@ -155,7 +155,9 @@ def draw_sign_corner_grid(
             [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
         ).reshape(-1, 1, 2)
         flat_centres = cv2.perspectiveTransform(centres, M).reshape(-1, 2)
-        xp = float(np.median(flat_centres[:, 0]))
+        # Anchor at the leftmost placard (same logic as fitting.py)
+        leftmost_idx = int(np.argmin(flat_centres[:, 0]))
+        xp = float(flat_centres[leftmost_idx, 0])
         yp = float(np.median(flat_centres[:, 1]))
 
         def _boundaries(centre: float, step: float, limit: int) -> list[int]:
@@ -241,7 +243,9 @@ def render_flat_annotated_image(
             [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
         ).reshape(-1, 1, 2)
         flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
-        xp = float(np.median(flat_centres[:, 0]))
+        # Anchor at the leftmost placard (same logic as fitting.py)
+        leftmost_idx = int(np.argmin(flat_centres[:, 0]))
+        xp = float(flat_centres[leftmost_idx, 0])
         yp = float(np.median(flat_centres[:, 1]))
 
         def _boundaries(centre: float, step: float, limit: int) -> list[int]:
