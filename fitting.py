@@ -189,45 +189,24 @@ def place_rectangles_perspective_aware(
         kernel = np.ones((2 * margin + 1, 2 * margin + 1), dtype=np.uint8)
         warped_mask = _safe_erode(warped_mask, kernel)
 
-    # Build grid anchor from detected placard centres (warped to flat space)
+    # Grid defined by the existing placard:
+    #   - Cell centres anchored at the existing placard centre (in flat space)
+    #   - Cell pitch = detected placard size (grid_w × grid_h), fixed regardless
+    #     of the scale / spacing sliders so the grid never shifts as sliders move
     grid_xs: list[float] | None = None
     grid_ys: list[float] | None = None
     if placard_predictions and placard_w > 0 and placard_h > 0:
-        # Anchor the grid at the median centre of existing placard detections
-        # (warped to flat space) so a grid line always passes through each
-        # existing placard.
+        gw = float(grid_w if grid_w and grid_w > 0 else placard_w) or 1.0
+        gh = float(grid_h if grid_h and grid_h > 0 else placard_h) or 1.0
         centres = np.array(
             [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
         ).reshape(-1, 1, 2)
         flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
         xp = float(np.median(flat_centres[:, 0]))
         yp = float(np.median(flat_centres[:, 1]))
-        # Step = distance from sign centre to existing placard centre.
-        # Anchoring at sign centre (dst_w/2) with this step puts one line on
-        # the existing placard, one mirrored line the same distance from the
-        # opposite edge, and one line at the centre — perfectly symmetric.
-        cx = dst_w / 2.0
-        cy = dst_h / 2.0
-        # Minimum spacing rules for the regular grid.
-        _min_pw = float(
-            min((p["width"] for p in placard_predictions), default=0)
-            or (grid_w if grid_w and grid_w > 0 else placard_w)
-            or 1
-        )
-        # Regular grid anchored at sign centre with minimum-spacing step.
-        step_x = max(abs(xp - cx), _min_pw)
-        step_y = max(abs(yp - cy), _min_pw / 2.0)
-        raw_xs = _grid_lines(cx, step_x, dst_w)
-        raw_ys = _grid_lines(cy, step_y, dst_h)
-        # Snap the nearest regular line to the exact placard centre so exactly
-        # one line passes through it (no extras added, no duplicate).
-        def _snap(lines, target):
-            if not lines:
-                return lines
-            nearest = min(lines, key=lambda v: abs(v - target))
-            return sorted(set([target if v == nearest else v for v in lines]))
-        grid_xs = _snap(raw_xs, xp)
-        grid_ys = _snap(raw_ys, yp)
+        # Cell centres expand outward from the existing placard at cell-pitch intervals.
+        grid_xs = _grid_lines(xp, gw, dst_w)
+        grid_ys = _grid_lines(yp, gh, dst_h)
 
     quads: list[list[list[float]]] = []
 
