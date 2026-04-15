@@ -311,6 +311,8 @@ def _run_fitting(
         min_confidence=0.0,
         sign_quad=results.get("sign_quad"),
         sign_polygon=results.get("sign_polygon"),
+        placard_w=results.get("placard_w"),
+        placard_h=results.get("placard_h"),
     )
     annotated_bytes = _to_jpeg_bytes(annotated_rgb)
     flat_bytes = _warp_sign_flat(pil_image, results.get("sign_quad"))

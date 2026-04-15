@@ -98,17 +98,23 @@ def draw_proposed_placements(
 def draw_sign_corner_grid(
     img: np.ndarray,
     sign_quad: list[dict],
-    cols: int = 10,
-    rows: int = 6,
+    placard_predictions: list[dict] | None = None,
+    placard_w: int | None = None,
+    placard_h: int | None = None,
     alpha: float = 0.45,
 ) -> np.ndarray:
     """
     Draw a perspective-corrected slot grid over the sign panel.
 
+    When placard_predictions, placard_w, and placard_h are supplied the grid is
+    anchored to the median centre of the detected placards (warped to flat space)
+    and lines are spaced at placard_w / placard_h intervals expanding outward.
+    Falls back to a uniform 10 × 6 grid when no placard data is available.
+
     Pipeline:
       1. Warp the sign quad to a flat rectangle via getPerspectiveTransform.
-      2. Draw a uniform grid across the full flat extent.
-      3. Warp the grid overlay back to the original perspective.
+      2. Draw the grid on the flat canvas.
+      3. Warp the overlay back to the original perspective.
       4. Blend onto the original image inside the sign quad footprint.
 
     sign_quad: [TL, TR, BR, BL] dicts with 'x' and 'y' keys.
@@ -132,11 +138,47 @@ def draw_sign_corner_grid(
     flat    = cv2.warpPerspective(img, M, (fw, fh))
     overlay = flat.copy()
 
-    for i in range(cols + 1):
-        x = int(i * fw / cols)
+    # --- Decide grid line positions ---
+    use_anchored = (
+        placard_predictions
+        and placard_w and placard_w > 0
+        and placard_h and placard_h > 0
+    )
+
+    if use_anchored:
+        # Warp each detected placard centre into flat space
+        centres = np.array(
+            [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
+        ).reshape(-1, 1, 2)
+        flat_centres = cv2.perspectiveTransform(centres, M).reshape(-1, 2)
+
+        # Anchor point = median centre across all detected placards
+        x0 = float(np.median(flat_centres[:, 0]))
+        y0 = float(np.median(flat_centres[:, 1]))
+
+        # Build lists of line positions by expanding outward from the anchor
+        def _expand(origin: float, step: int, limit: int) -> list[int]:
+            positions = []
+            pos = origin
+            while pos <= limit:
+                positions.append(int(round(pos)))
+                pos += step
+            pos = origin - step
+            while pos >= 0:
+                positions.append(int(round(pos)))
+                pos -= step
+            return sorted(set(positions))
+
+        xs = _expand(x0, placard_w, fw)
+        ys = _expand(y0, placard_h, fh)
+    else:
+        # Fallback: uniform 10 × 6 grid
+        xs = [int(i * fw / 10) for i in range(11)]
+        ys = [int(j * fh / 6)  for j in range(7)]
+
+    for x in xs:
         cv2.line(overlay, (x, 0), (x, fh), COLOR_GRID, 2, cv2.LINE_AA)
-    for j in range(rows + 1):
-        y = int(j * fh / rows)
+    for y in ys:
         cv2.line(overlay, (0, y), (fw, y), COLOR_GRID, 2, cv2.LINE_AA)
 
     flat_blended = cv2.addWeighted(overlay, alpha, flat, 1.0 - alpha, 0)
@@ -160,12 +202,15 @@ def render_annotated_image(
     min_confidence: float = 0.0,
     sign_quad: list[dict] | None = None,
     sign_polygon: list[dict] | None = None,
+    placard_w: int | None = None,
+    placard_h: int | None = None,
 ) -> Image.Image:
     """
     Compose all overlays onto the image and return a PIL Image.
 
     sign_quad    – exactly 4 corners [TL, TR, BR, BL], used for the perspective grid
     sign_polygon – raw model polygon (all points), used for the yellow outline
+    placard_w/h  – used to anchor the grid spacing to detected placard dimensions
 
     Drawing order:
       1. Perspective grid (if sign_quad detected)
@@ -178,7 +223,12 @@ def render_annotated_image(
     img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
     if sign_quad:
-        img = draw_sign_corner_grid(img, sign_quad)
+        img = draw_sign_corner_grid(
+            img, sign_quad,
+            placard_predictions=placard_predictions if placard_predictions else None,
+            placard_w=placard_w,
+            placard_h=placard_h,
+        )
 
     outline_pts = sign_polygon or sign_quad
     if outline_pts:
