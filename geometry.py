@@ -110,7 +110,7 @@ def sign_polygon_from_pred(pred: dict) -> list[dict]:
     points = pred.get("points")
     if points and len(points) >= 3:
         pts = np.array([[p["x"], p["y"]] for p in points], dtype=np.float32)
-        pts = _remove_polygon_spikes(pts, min_angle_deg=50.0)
+        pts = _remove_polygon_spikes(pts, min_angle_deg=60.0)
         return [{"x": float(p[0]), "y": float(p[1])} for p in pts]
     x1, y1, x2, y2 = bbox_to_xyxy(pred)
     return [

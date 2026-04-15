@@ -11,9 +11,11 @@ Workflow:
   4. Adjust sliders to live-update placard placements without re-running inference.
 """
 
+import hashlib
 import json
 import os
 from io import BytesIO
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -75,6 +77,44 @@ def load_settings() -> dict:
 def save_settings(values: dict) -> None:
     with open(SETTINGS_FILE, "w") as f:
         json.dump(values, f, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Response cache  — saves Roboflow API responses to disk keyed by image hash
+# so re-runs never hit the API again for the same image.
+# ---------------------------------------------------------------------------
+
+_CACHE_DIR = Path("response_cache")
+
+
+def _cache_key(img_bytes: bytes) -> str:
+    return hashlib.md5(img_bytes).hexdigest()
+
+
+def _load_cached_responses(key: str) -> dict | None:
+    path = _CACHE_DIR / f"{key}.json"
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            pass
+    return None
+
+
+def _save_cached_responses(key: str, sign_resp: dict, empty_resp: dict, placard_resp: dict) -> None:
+    _CACHE_DIR.mkdir(exist_ok=True)
+    path = _CACHE_DIR / f"{key}.json"
+    path.write_text(json.dumps({"sign": sign_resp, "empty": empty_resp, "placard": placard_resp}))
+
+
+def _clear_response_cache() -> int:
+    if not _CACHE_DIR.exists():
+        return 0
+    count = 0
+    for f in _CACHE_DIR.glob("*.json"):
+        f.unlink()
+        count += 1
+    return count
 
 
 if "settings_loaded" not in st.session_state:
@@ -172,6 +212,15 @@ with st.sidebar:
         "Minimum confidence", min_value=0.0, max_value=1.0, step=0.05,
         key="min_confidence",
     )
+
+    st.divider()
+    st.subheader("Response Cache")
+    st.caption("API responses are cached by image hash so re-uploading the same image never hits the API again.")
+    n_cached = len(list(_CACHE_DIR.glob("*.json"))) if _CACHE_DIR.exists() else 0
+    st.caption(f"{n_cached} image(s) cached")
+    if st.button("Clear Response Cache", use_container_width=True, disabled=n_cached == 0):
+        cleared = _clear_response_cache()
+        st.success(f"Cleared {cleared} cached response(s).")
 
     st.divider()
     if st.button("Save Settings", use_container_width=True):
@@ -351,13 +400,24 @@ def _run_inference_on_image(pil_image: Image.Image, sign_id: str) -> dict:
         empty_resp   = MOCK_EMPTY_SPACE_RESPONSE
         placard_resp = MOCK_PLACARD_RESPONSE
         used_mock    = True
+        cache_hit    = False
     else:
-        sign_resp  = call_sign_model(
-            pil_image, api_key, sign_project, int(sign_version), confidence=conf)
-        empty_resp = call_empty_space_model(
-            pil_image, api_key, empty_project, int(empty_version), confidence=conf)
-        placard_resp = call_placard_model(
-            pil_image, api_key, placard_project, int(placard_version), confidence=conf)
+        cache_hit = False
+        key = _cache_key(img_bytes)
+        cached = _load_cached_responses(key)
+        if cached is not None:
+            sign_resp    = cached["sign"]
+            empty_resp   = cached["empty"]
+            placard_resp = cached["placard"]
+            cache_hit    = True
+        else:
+            sign_resp  = call_sign_model(
+                pil_image, api_key, sign_project, int(sign_version), confidence=conf)
+            empty_resp = call_empty_space_model(
+                pil_image, api_key, empty_project, int(empty_version), confidence=conf)
+            placard_resp = call_placard_model(
+                pil_image, api_key, placard_project, int(placard_version), confidence=conf)
+            _save_cached_responses(key, sign_resp, empty_resp, placard_resp)
         used_mock = False
 
     sign_pred        = _best_sign_pred(sign_resp, conf)
@@ -388,6 +448,7 @@ def _run_inference_on_image(pil_image: Image.Image, sign_id: str) -> dict:
         "sign_detected":        sign_pred is not None,
         "size_from_detections": results.get("size_from_detections", False),
         "mock_mode":            used_mock,
+        "cache_hit":            cache_hit,
         "_sign_resp":           sign_resp,
         "_empty_resp":          empty_resp,
         "_placard_resp":        placard_resp,
@@ -437,6 +498,8 @@ def _render_results(results_list: list) -> None:
 
         if item.get("mock_mode"):
             st.info("Mock Mode — using built-in sample predictions (no API call made).")
+        elif item.get("cache_hit"):
+            st.success("Loaded from response cache — no API call made.")
 
         if not item.get("sign_detected"):
             st.warning("No sign boundary detected — perspective correction skipped.")
