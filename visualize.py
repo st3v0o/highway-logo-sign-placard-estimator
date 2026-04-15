@@ -173,10 +173,14 @@ def draw_sign_corner_grid(
                 pos -= step
             return sorted(set(positions))
 
-        # Step = distance from sign centre to existing placard centre.
-        # Using max(..., _pw+gap) would displace the placard off its grid line.
-        xs = _expand(cx, max(abs(xp - cx), 1.0), fw)
-        ys = _expand(cy, max(abs(yp - cy), 1.0), fh)
+        # Minimum spacing: vertical ≥ smallest detected placard width,
+        # horizontal ≥ half that.
+        _min_pw = float(
+            min((p["width"] for p in placard_predictions), default=0)
+            or (grid_w if grid_w and grid_w > 0 else (placard_w or 1))
+        )
+        xs = _expand(cx, max(abs(xp - cx), _min_pw), fw)
+        ys = _expand(cy, max(abs(yp - cy), _min_pw / 2.0), fh)
     else:
         # Fallback: uniform 10 × 6 grid
         xs = [int(i * fw / 10) for i in range(11)]
@@ -261,10 +265,14 @@ def render_flat_annotated_image(
                 pos -= step
             return sorted(set(positions))
 
-        # Step = distance from sign centre to existing placard centre.
-        # Using max(..., _pw+gap) would displace the placard off its grid line.
-        xs = _expand(cx, max(abs(xp - cx), 1.0), dst_w)
-        ys = _expand(cy, max(abs(yp - cy), 1.0), dst_h)
+        # Minimum spacing: vertical ≥ smallest detected placard width,
+        # horizontal ≥ half that.
+        _min_pw = float(
+            min((p["width"] for p in placard_predictions), default=0)
+            or (grid_w if grid_w and grid_w > 0 else (placard_w or 1))
+        )
+        xs = _expand(cx, max(abs(xp - cx), _min_pw), dst_w)
+        ys = _expand(cy, max(abs(yp - cy), _min_pw / 2.0), dst_h)
     else:
         xs = [int(i * dst_w / 10) for i in range(11)]
         ys = [int(j * dst_h / 6)  for j in range(7)]

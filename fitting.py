@@ -208,11 +208,16 @@ def place_rectangles_perspective_aware(
         # opposite edge, and one line at the centre — perfectly symmetric.
         cx = dst_w / 2.0
         cy = dst_h / 2.0
-        # Step = distance from sign centre to existing placard centre.
-        # This is the ONLY value that keeps a grid line exactly on the placard.
-        # (Never override with placard_w — that would shift the placard off the line.)
-        step_x = max(abs(xp - cx), 1.0)
-        step_y = max(abs(yp - cy), 1.0)
+        # Minimum spacing rules (user requirement):
+        #   vertical   ≥ smallest detected placard width
+        #   horizontal ≥ half that
+        _min_pw = float(
+            min((p["width"] for p in placard_predictions), default=0)
+            or (grid_w if grid_w and grid_w > 0 else placard_w)
+            or 1
+        )
+        step_x = max(abs(xp - cx), _min_pw)
+        step_y = max(abs(yp - cy), _min_pw / 2.0)
         grid_xs = _grid_lines(cx, step_x, dst_w)
         grid_ys = _grid_lines(cy, step_y, dst_h)
 
