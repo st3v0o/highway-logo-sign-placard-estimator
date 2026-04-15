@@ -199,11 +199,15 @@ def place_rectangles_perspective_aware(
         flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
         x0 = float(np.median(flat_centres[:, 0]))
         y0 = float(np.median(flat_centres[:, 1]))
-        # Grid step uses the raw detected size (not the scaled slot size) so the
-        # grid stays fixed when placard_scale changes. Fall back to slot size if
-        # no detected size is provided.
-        step_x = (grid_w if grid_w and grid_w > 0 else placard_w) + spacing
-        step_y = (grid_h if grid_h and grid_h > 0 else placard_h) + spacing
+        # Grid pitch: detected placard size + a small fixed gap (8 px).
+        # We intentionally do NOT add the user's `spacing` here — spacing is a
+        # reservation buffer used after placement, not a grid-density control.
+        # Using detected size (not scaled size) keeps the visual grid stable.
+        _GRID_GAP = 8
+        base_x = grid_w if grid_w and grid_w > 0 else placard_w
+        base_y = grid_h if grid_h and grid_h > 0 else placard_h
+        step_x = base_x + _GRID_GAP
+        step_y = base_y + _GRID_GAP
         grid_xs = _grid_lines(x0, step_x, dst_w)
         grid_ys = _grid_lines(y0, step_y, dst_h)
 
@@ -248,12 +252,10 @@ def place_rectangles_perspective_aware(
                 ).reshape(-1, 1, 2)
                 warped_corners = cv2.perspectiveTransform(corners, H_inv).reshape(-1, 2)
                 quads.append(warped_corners.tolist())
-                # Mark placard footprint + spacing buffer as used
-                sy1 = max(0, y1 - spacing)
-                sx1 = max(0, x1 - spacing)
-                sy2 = min(dst_h, y2 + spacing)
-                sx2 = min(dst_w, x2 + spacing)
-                available[sy1:sy2, sx1:sx2] = 0
+                # Mark only the exact slot footprint as used.
+                # We do NOT add a spacing buffer here so that the adjacent grid
+                # cell (8 px away) remains available for its own slot.
+                available[y1:y2, x1:x2] = 0
                 if global_reserved is not None:
                     cv2.fillConvexPoly(global_reserved, warped_corners.astype(np.int32), 1)
     else:
