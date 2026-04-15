@@ -101,6 +101,7 @@ def draw_sign_corner_grid(
     placard_predictions: list[dict] | None = None,
     placard_w: int | None = None,
     placard_h: int | None = None,
+    spacing: int = 0,
     alpha: float = 0.45,
 ) -> np.ndarray:
     """
@@ -169,8 +170,8 @@ def draw_sign_corner_grid(
                 pos -= step
             return sorted(set(positions))
 
-        xs = _expand(x0, placard_w, fw)
-        ys = _expand(y0, placard_h, fh)
+        xs = _expand(x0, placard_w + spacing, fw)
+        ys = _expand(y0, placard_h + spacing, fh)
     else:
         # Fallback: uniform 10 × 6 grid
         xs = [int(i * fw / 10) for i in range(11)]
@@ -202,6 +203,7 @@ def render_flat_annotated_image(
     empty_space_predictions: list[dict],
     placard_w: int | None = None,
     placard_h: int | None = None,
+    spacing: int = 0,
     min_confidence: float = 0.0,
 ) -> Image.Image:
     """
@@ -249,8 +251,8 @@ def render_flat_annotated_image(
                 pos -= step
             return sorted(set(positions))
 
-        xs = _expand(x0, placard_w, dst_w)
-        ys = _expand(y0, placard_h, dst_h)
+        xs = _expand(x0, placard_w + spacing, dst_w)
+        ys = _expand(y0, placard_h + spacing, dst_h)
     else:
         xs = [int(i * dst_w / 10) for i in range(11)]
         ys = [int(j * dst_h / 6)  for j in range(7)]
@@ -311,6 +313,7 @@ def render_annotated_image(
     sign_polygon: list[dict] | None = None,
     placard_w: int | None = None,
     placard_h: int | None = None,
+    spacing: int = 0,
 ) -> Image.Image:
     """
     Compose all overlays onto the image and return a PIL Image.
@@ -335,6 +338,7 @@ def render_annotated_image(
             placard_predictions=placard_predictions if placard_predictions else None,
             placard_w=placard_w,
             placard_h=placard_h,
+            spacing=spacing,
         )
 
     outline_pts = sign_quad or sign_polygon

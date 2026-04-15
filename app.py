@@ -362,6 +362,7 @@ def _run_fitting(
         sign_polygon=results.get("sign_polygon"),
         placard_w=results.get("placard_w"),
         placard_h=results.get("placard_h"),
+        spacing=params["spacing"],
     )
     annotated_bytes = _to_jpeg_bytes(annotated_rgb)
 
@@ -375,6 +376,7 @@ def _run_fitting(
             empty_space_predictions=empty_predictions,
             placard_w=results.get("placard_w"),
             placard_h=results.get("placard_h"),
+            spacing=params["spacing"],
             min_confidence=0.0,
         )
         flat_bytes = _to_jpeg_bytes(flat_pil)
