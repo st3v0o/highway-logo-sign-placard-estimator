@@ -72,12 +72,14 @@ def _resample_polygon(pts: np.ndarray, n: int = 60) -> np.ndarray:
     smoothing can actually move bumps rather than nudging individual pixels.
     """
     pts = pts.astype(np.float32)
-    # Compute cumulative arc length
+    # Compute cumulative arc length (one delta per edge, closing edge included)
     deltas = np.linalg.norm(np.roll(pts, -1, axis=0) - pts, axis=1)
-    cum = np.concatenate([[0.0], np.cumsum(deltas)])
-    total = cum[-1]
+    cum_full = np.concatenate([[0.0], np.cumsum(deltas)])  # length = len(pts)+1
+    total = float(cum_full[-1])
     if total < 1.0:
         return pts
+    # cum paired with pts must be same length — use cum_full[:-1]
+    cum = cum_full[:-1]
     targets = np.linspace(0.0, total, n, endpoint=False)
     # Interpolate x and y separately
     new_x = np.interp(targets, cum, pts[:, 0])
