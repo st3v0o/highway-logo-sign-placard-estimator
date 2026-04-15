@@ -512,7 +512,7 @@ def _render_results(results_list: list) -> None:
 
         col_img, col_stats = st.columns([3, 1])
         with col_img:
-            tab_annotated, tab_flat = st.tabs(["Annotated", "Perspective-Corrected Sign"])
+            tab_flat, tab_annotated = st.tabs(["Perspective-Corrected Sign", "Annotated"])
             with tab_annotated:
                 st.caption(
                     "**Cyan** = proposed new placard slots  |  "
