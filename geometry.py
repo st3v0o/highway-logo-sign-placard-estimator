@@ -67,13 +67,18 @@ def prediction_to_mask(pred: dict, img_h: int, img_w: int) -> tuple[np.ndarray, 
 
 def sign_polygon_from_pred(pred: dict) -> list[dict]:
     """
-    Return the raw polygon points from a Blue-Logo-Sign detection exactly as the
-    model provided them. Falls back to bbox corners when no polygon is present.
-    Used for drawing the sign outline overlay.
+    Return the convex hull of the Blue-Logo-Sign polygon points.
+
+    The raw model polygon can include concave "spiky" artifacts around sign
+    features (e.g. text panels, top brackets). Taking the convex hull removes
+    all inward concavities, yielding a clean outline. Falls back to bbox corners
+    when no polygon is present.
     """
     points = pred.get("points")
     if points and len(points) >= 3:
-        return [{"x": float(p["x"]), "y": float(p["y"])} for p in points]
+        pts = np.array([[p["x"], p["y"]] for p in points], dtype=np.float32)
+        hull = cv2.convexHull(pts).reshape(-1, 2)
+        return [{"x": float(p[0]), "y": float(p[1])} for p in hull]
     x1, y1, x2, y2 = bbox_to_xyxy(pred)
     return [
         {"x": float(x1), "y": float(y1)},
