@@ -174,13 +174,9 @@ def draw_sign_corner_grid(
             return sorted(set(positions))
 
         # Step = distance from sign centre to existing placard centre.
-        # Anchor at sign centre → left and right grid lines are equidistant from edges,
-        # and one line lands exactly on the existing placard.
-        _GRID_GAP = 8
-        _pw = grid_w if grid_w and grid_w > 0 else (placard_w or 1)
-        _ph = grid_h if grid_h and grid_h > 0 else (placard_h or 1)
-        xs = _expand(cx, max(abs(xp - cx), _pw + _GRID_GAP), fw)
-        ys = _expand(cy, max(abs(yp - cy), _ph + _GRID_GAP), fh)
+        # Using max(..., _pw+gap) would displace the placard off its grid line.
+        xs = _expand(cx, max(abs(xp - cx), 1.0), fw)
+        ys = _expand(cy, max(abs(yp - cy), 1.0), fh)
     else:
         # Fallback: uniform 10 × 6 grid
         xs = [int(i * fw / 10) for i in range(11)]
@@ -266,13 +262,9 @@ def render_flat_annotated_image(
             return sorted(set(positions))
 
         # Step = distance from sign centre to existing placard centre.
-        # Anchor at sign centre → left and right grid lines are equidistant from edges,
-        # and one line lands exactly on the existing placard.
-        _GRID_GAP = 8
-        _pw = grid_w if grid_w and grid_w > 0 else (placard_w or 1)
-        _ph = grid_h if grid_h and grid_h > 0 else (placard_h or 1)
-        xs = _expand(cx, max(abs(xp - cx), _pw + _GRID_GAP), dst_w)
-        ys = _expand(cy, max(abs(yp - cy), _ph + _GRID_GAP), dst_h)
+        # Using max(..., _pw+gap) would displace the placard off its grid line.
+        xs = _expand(cx, max(abs(xp - cx), 1.0), dst_w)
+        ys = _expand(cy, max(abs(yp - cy), 1.0), dst_h)
     else:
         xs = [int(i * dst_w / 10) for i in range(11)]
         ys = [int(j * dst_h / 6)  for j in range(7)]
