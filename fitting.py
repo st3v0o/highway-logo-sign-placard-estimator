@@ -199,12 +199,12 @@ def place_rectangles_perspective_aware(
         flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
         x0 = float(np.median(flat_centres[:, 0]))
         y0 = float(np.median(flat_centres[:, 1]))
-        # Grid pitch = scaled slot size + user spacing (the inter-slot gap).
-        # Reducing placard_scale shrinks placard_w → tighter pitch → more columns.
-        # The reservation below clears only the exact footprint (not ±spacing),
-        # so the adjacent grid cell at (placard_w + spacing) away stays open.
-        step_x = max(1, placard_w + spacing)
-        step_y = max(1, placard_h + spacing)
+        # Grid pitch = scaled slot size + fixed 8 px gap.
+        # Spacing is NOT part of the pitch — it only controls the reservation
+        # buffer after placement, so changing spacing never moves the grid lines.
+        _GRID_GAP = 8
+        step_x = max(1, placard_w + _GRID_GAP)
+        step_y = max(1, placard_h + _GRID_GAP)
         grid_xs = _grid_lines(x0, step_x, dst_w)
         grid_ys = _grid_lines(y0, step_y, dst_h)
 
@@ -212,35 +212,36 @@ def place_rectangles_perspective_aware(
 
     if grid_xs is not None and grid_ys is not None:
         # Grid-snapped placement: try every grid intersection.
-        # The availability mask covers the FULL flat sign space (all 1s) with
-        # existing placards punched out.  We do NOT require the slot to sit inside
-        # the empty-space detection polygon — the grid anchor already guarantees
-        # alignment with real placard positions, so any in-bounds, unoccupied
-        # grid cell is a valid proposed slot.
+        # available = full sign flat space (all 1s) with existing placards and
+        # their spacing buffers punched out.  Outer margin is enforced via
+        # per-slot boundary checks.
         available = np.ones((dst_h, dst_w), dtype=np.uint8)
         if placard_predictions:
             for pp in placard_predictions:
                 px, py = pp.get("x", 0), pp.get("y", 0)
                 pw2, ph2 = pp.get("width", 0) / 2, pp.get("height", 0) / 2
+                # Expand each existing placard by the spacing buffer so proposed
+                # slots cannot land within `spacing` px of an occupied slot.
+                pw2s = pw2 + spacing
+                ph2s = ph2 + spacing
                 box = np.array([
-                    [px - pw2, py - ph2],
-                    [px + pw2, py - ph2],
-                    [px + pw2, py + ph2],
-                    [px - pw2, py + ph2],
+                    [px - pw2s, py - ph2s],
+                    [px + pw2s, py - ph2s],
+                    [px + pw2s, py + ph2s],
+                    [px - pw2s, py + ph2s],
                 ], dtype=np.float32).reshape(-1, 1, 2)
                 flat_box = cv2.perspectiveTransform(box, H).reshape(-1, 2).astype(np.int32)
-                # erode slightly so the border of the existing placard doesn't eat
-                # into adjacent grid cells
                 cv2.fillConvexPoly(available, flat_box, 0)
         for y_line in grid_ys:
             y1 = int(round(y_line - placard_h / 2))
             y2 = y1 + placard_h
-            if y1 < 0 or y2 > dst_h:
+            # Outer margin: keep proposed slots away from the sign boundary
+            if y1 < margin or y2 > dst_h - margin:
                 continue
             for x_line in grid_xs:
                 x1 = int(round(x_line - placard_w / 2))
                 x2 = x1 + placard_w
-                if x1 < 0 or x2 > dst_w:
+                if x1 < margin or x2 > dst_w - margin:
                     continue
                 if not can_place_rectangle(available, x1, y1, placard_w, placard_h):
                     continue
@@ -249,10 +250,13 @@ def place_rectangles_perspective_aware(
                 ).reshape(-1, 1, 2)
                 warped_corners = cv2.perspectiveTransform(corners, H_inv).reshape(-1, 2)
                 quads.append(warped_corners.tolist())
-                # Mark only the exact slot footprint as used.
-                # We do NOT add a spacing buffer here so that the adjacent grid
-                # cell (8 px away) remains available for its own slot.
-                available[y1:y2, x1:x2] = 0
+                # Reserve the footprint PLUS the spacing buffer so no other
+                # proposed slot can land within `spacing` px of this one.
+                sy1 = max(0, y1 - spacing)
+                sx1 = max(0, x1 - spacing)
+                sy2 = min(dst_h, y2 + spacing)
+                sx2 = min(dst_w, x2 + spacing)
+                available[sy1:sy2, sx1:sx2] = 0
                 if global_reserved is not None:
                     cv2.fillConvexPoly(global_reserved, warped_corners.astype(np.int32), 1)
     else:
