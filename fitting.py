@@ -197,8 +197,9 @@ def place_rectangles_perspective_aware(
         flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
         x0 = float(np.median(flat_centres[:, 0]))
         y0 = float(np.median(flat_centres[:, 1]))
-        grid_xs = _grid_lines(x0, placard_w, dst_w)
-        grid_ys = _grid_lines(y0, placard_h, dst_h)
+        # Step includes spacing so adjacent grid slots have a gap between them
+        grid_xs = _grid_lines(x0, placard_w + spacing, dst_w)
+        grid_ys = _grid_lines(y0, placard_h + spacing, dst_h)
 
     quads: list[list[list[float]]] = []
 
@@ -223,8 +224,12 @@ def place_rectangles_perspective_aware(
                 ).reshape(-1, 1, 2)
                 warped_corners = cv2.perspectiveTransform(corners, H_inv).reshape(-1, 2)
                 quads.append(warped_corners.tolist())
-                # Mark flat space as used so we don't double-place
-                available[y1:y2, x1:x2] = 0
+                # Mark placard footprint + spacing buffer as used
+                sy1 = max(0, y1 - spacing)
+                sx1 = max(0, x1 - spacing)
+                sy2 = min(dst_h, y2 + spacing)
+                sx2 = min(dst_w, x2 + spacing)
+                available[sy1:sy2, sx1:sx2] = 0
                 if global_reserved is not None:
                     cv2.fillConvexPoly(global_reserved, warped_corners.astype(np.int32), 1)
     else:
