@@ -65,6 +65,26 @@ def prediction_to_mask(pred: dict, img_h: int, img_w: int) -> tuple[np.ndarray, 
     return bbox_to_mask(x1, y1, x2, y2, img_h, img_w), False
 
 
+def _resample_polygon(pts: np.ndarray, n: int = 60) -> np.ndarray:
+    """
+    Resample a polygon to exactly n evenly-spaced points along its perimeter.
+    This compresses dense model polygons (600+ points) down so that Laplacian
+    smoothing can actually move bumps rather than nudging individual pixels.
+    """
+    pts = pts.astype(np.float32)
+    # Compute cumulative arc length
+    deltas = np.linalg.norm(np.roll(pts, -1, axis=0) - pts, axis=1)
+    cum = np.concatenate([[0.0], np.cumsum(deltas)])
+    total = cum[-1]
+    if total < 1.0:
+        return pts
+    targets = np.linspace(0.0, total, n, endpoint=False)
+    # Interpolate x and y separately
+    new_x = np.interp(targets, cum, pts[:, 0])
+    new_y = np.interp(targets, cum, pts[:, 1])
+    return np.column_stack([new_x, new_y]).astype(np.float32)
+
+
 def _smooth_polygon(pts: np.ndarray, iterations: int = 8, alpha: float = 0.4) -> np.ndarray:
     """
     Laplacian smoothing: move each vertex towards the midpoint of its neighbours.
@@ -130,8 +150,11 @@ def sign_polygon_from_pred(pred: dict) -> list[dict]:
     points = pred.get("points")
     if points and len(points) >= 3:
         pts = np.array([[p["x"], p["y"]] for p in points], dtype=np.float32)
+        # Resample dense model polygons (often 600+ pts) to 60 evenly-spaced
+        # points so that Laplacian smoothing can actually move bumps.
+        pts = _resample_polygon(pts, n=60)
         pts = _remove_polygon_spikes(pts, min_angle_deg=60.0)
-        pts = _smooth_polygon(pts, iterations=8, alpha=0.4)
+        pts = _smooth_polygon(pts, iterations=15, alpha=0.5)
         return [{"x": float(p[0]), "y": float(p[1])} for p in pts]
     x1, y1, x2, y2 = bbox_to_xyxy(pred)
     return [
