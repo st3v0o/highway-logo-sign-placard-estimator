@@ -77,7 +77,7 @@ def sign_polygon_from_pred(pred: dict) -> list[dict]:
     if points and len(points) >= 3:
         pts = np.array([[p["x"], p["y"]] for p in points], dtype=np.float32)
         perimeter = cv2.arcLength(pts, closed=True)
-        epsilon = 0.015 * perimeter
+        epsilon = 0.03 * perimeter
         simplified = cv2.approxPolyDP(pts, epsilon, closed=True).reshape(-1, 2)
         return [{"x": float(p[0]), "y": float(p[1])} for p in simplified]
     x1, y1, x2, y2 = bbox_to_xyxy(pred)
