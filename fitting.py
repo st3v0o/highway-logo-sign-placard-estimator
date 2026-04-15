@@ -271,19 +271,36 @@ def estimate_placard_size_from_detections(
     if not valid:
         return None
 
-    H: np.ndarray | None = None
+    # Build sign axis unit vectors and flat-space scale from the sign quad.
+    # We project bbox corners directly onto the sign's own X/Y axes (in image
+    # space) to get sign-space extents, then scale to flat-space pixels.
+    # This avoids the non-uniform pixel-scale artefact that flat-space
+    # homography warping introduces (the left-side vertical stretch).
+    sign_x_unit: np.ndarray | None = None
+    sign_y_unit: np.ndarray | None = None
+    flat_w_per_proj: float = 1.0
+    flat_h_per_proj: float = 1.0
+
     if sign_quad and len(sign_quad) == 4:
-        pts = np.array([[p["x"], p["y"]] for p in sign_quad], dtype=np.float32)
         from geometry import order_points
-        src = order_points(pts)
-        w_top  = float(np.linalg.norm(src[1] - src[0]))
-        w_bot  = float(np.linalg.norm(src[2] - src[3]))
-        h_left = float(np.linalg.norm(src[3] - src[0]))
-        h_right= float(np.linalg.norm(src[2] - src[1]))
-        dst_w  = max(1, int(max(w_top, w_bot)))
-        dst_h  = max(1, int(max(h_left, h_right)))
-        dst    = np.array([[0, 0], [dst_w - 1, 0], [dst_w - 1, dst_h - 1], [0, dst_h - 1]], dtype=np.float32)
-        H = cv2.getPerspectiveTransform(src, dst)
+        pts = np.array([[p["x"], p["y"]] for p in sign_quad], dtype=np.float32)
+        src = order_points(pts)  # [TL, TR, BR, BL]
+        tl, tr, br, bl = src
+
+        w_top   = float(np.linalg.norm(tr - tl))
+        w_bot   = float(np.linalg.norm(br - bl))
+        h_left  = float(np.linalg.norm(bl - tl))
+        h_right = float(np.linalg.norm(br - tr))
+        sign_w_px = max(w_top, w_bot)      # apparent sign width in image pixels
+        sign_h_px = max(h_left, h_right)   # apparent sign height in image pixels
+
+        if sign_w_px > 0 and sign_h_px > 0:
+            sign_x_unit = (tr - tl) / w_top         # unit vector along sign's horizontal axis
+            sign_y_unit = (bl - tl) / h_left        # unit vector along sign's vertical axis
+            dst_w = max(1, int(sign_w_px))
+            dst_h = max(1, int(sign_h_px))
+            flat_w_per_proj = dst_w / sign_w_px      # flat-px per image-proj-unit (horiz)
+            flat_h_per_proj = dst_h / sign_h_px      # flat-px per image-proj-unit (vert)
 
     widths: list[float] = []
     heights: list[float] = []
@@ -294,17 +311,14 @@ def estimate_placard_size_from_detections(
         x1, y1 = cx - pw / 2, cy - ph / 2
         x2, y2 = cx + pw / 2, cy + ph / 2
 
-        if H is not None:
-            corners = np.array(
-                [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32
-            ).reshape(-1, 1, 2)
-            flat = cv2.perspectiveTransform(corners, H).reshape(-1, 2)
-            # Use axis-aligned extents in flat (sign) space.
-            # The bbox corners may warp to a tilted quad when the sign is
-            # viewed at an angle; the true sign-space dimensions are the
-            # axis-aligned width and height of that quad's bounding box.
-            mw = float(flat[:, 0].max() - flat[:, 0].min())
-            mh = float(flat[:, 1].max() - flat[:, 1].min())
+        if sign_x_unit is not None and sign_y_unit is not None:
+            # Project all four bbox corners onto sign's horizontal and vertical axes.
+            corners = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32)
+            proj_x = corners @ sign_x_unit  # dot product with sign-x unit
+            proj_y = corners @ sign_y_unit  # dot product with sign-y unit
+            # Extent along each sign axis gives the true sign-space dimension.
+            mw = float((proj_x.max() - proj_x.min()) * flat_w_per_proj)
+            mh = float((proj_y.max() - proj_y.min()) * flat_h_per_proj)
         else:
             mw, mh = float(pw), float(ph)
 
