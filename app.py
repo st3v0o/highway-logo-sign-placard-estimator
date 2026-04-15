@@ -363,6 +363,8 @@ def _run_fitting(
         placard_w=results.get("placard_w"),
         placard_h=results.get("placard_h"),
         spacing=params["spacing"],
+        grid_w=results.get("detected_placard_w"),
+        grid_h=results.get("detected_placard_h"),
     )
     annotated_bytes = _to_jpeg_bytes(annotated_rgb)
 
@@ -377,6 +379,8 @@ def _run_fitting(
             placard_w=results.get("placard_w"),
             placard_h=results.get("placard_h"),
             spacing=params["spacing"],
+            grid_w=results.get("detected_placard_w"),
+            grid_h=results.get("detected_placard_h"),
             min_confidence=0.0,
         )
         flat_bytes = _to_jpeg_bytes(flat_pil)

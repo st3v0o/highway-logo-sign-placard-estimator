@@ -102,6 +102,8 @@ def draw_sign_corner_grid(
     placard_w: int | None = None,
     placard_h: int | None = None,
     spacing: int = 0,
+    grid_w: int | None = None,
+    grid_h: int | None = None,
     alpha: float = 0.45,
 ) -> np.ndarray:
     """
@@ -170,8 +172,10 @@ def draw_sign_corner_grid(
                 pos -= step
             return sorted(set(positions))
 
-        xs = _expand(x0, placard_w + spacing, fw)
-        ys = _expand(y0, placard_h + spacing, fh)
+        step_x = (grid_w if grid_w and grid_w > 0 else placard_w) + spacing
+        step_y = (grid_h if grid_h and grid_h > 0 else placard_h) + spacing
+        xs = _expand(x0, step_x, fw)
+        ys = _expand(y0, step_y, fh)
     else:
         # Fallback: uniform 10 × 6 grid
         xs = [int(i * fw / 10) for i in range(11)]
@@ -204,6 +208,8 @@ def render_flat_annotated_image(
     placard_w: int | None = None,
     placard_h: int | None = None,
     spacing: int = 0,
+    grid_w: int | None = None,
+    grid_h: int | None = None,
     min_confidence: float = 0.0,
 ) -> Image.Image:
     """
@@ -251,8 +257,10 @@ def render_flat_annotated_image(
                 pos -= step
             return sorted(set(positions))
 
-        xs = _expand(x0, placard_w + spacing, dst_w)
-        ys = _expand(y0, placard_h + spacing, dst_h)
+        step_x = (grid_w if grid_w and grid_w > 0 else placard_w) + spacing
+        step_y = (grid_h if grid_h and grid_h > 0 else placard_h) + spacing
+        xs = _expand(x0, step_x, dst_w)
+        ys = _expand(y0, step_y, dst_h)
     else:
         xs = [int(i * dst_w / 10) for i in range(11)]
         ys = [int(j * dst_h / 6)  for j in range(7)]
@@ -314,13 +322,15 @@ def render_annotated_image(
     placard_w: int | None = None,
     placard_h: int | None = None,
     spacing: int = 0,
+    grid_w: int | None = None,
+    grid_h: int | None = None,
 ) -> Image.Image:
     """
     Compose all overlays onto the image and return a PIL Image.
 
     sign_quad    – exactly 4 corners [TL, TR, BR, BL], used for the perspective grid
     sign_polygon – raw model polygon (all points), used for the yellow outline
-    placard_w/h  – used to anchor the grid spacing to detected placard dimensions
+    placard_w/h  – scaled slot dimensions; grid_w/h – fixed unscaled grid step
 
     Drawing order:
       1. Perspective grid (if sign_quad detected)
@@ -339,6 +349,8 @@ def render_annotated_image(
             placard_w=placard_w,
             placard_h=placard_h,
             spacing=spacing,
+            grid_w=grid_w,
+            grid_h=grid_h,
         )
 
     outline_pts = sign_quad or sign_polygon

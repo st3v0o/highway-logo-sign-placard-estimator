@@ -151,6 +151,8 @@ def place_rectangles_perspective_aware(
     global_reserved: np.ndarray | None = None,
     sign_homography: tuple | None = None,
     placard_predictions: list[dict] | None = None,
+    grid_w: int | None = None,
+    grid_h: int | None = None,
 ) -> list[list[list[float]]]:
     """
     Perspective-aware placement for a single empty region.
@@ -197,9 +199,13 @@ def place_rectangles_perspective_aware(
         flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
         x0 = float(np.median(flat_centres[:, 0]))
         y0 = float(np.median(flat_centres[:, 1]))
-        # Step includes spacing so adjacent grid slots have a gap between them
-        grid_xs = _grid_lines(x0, placard_w + spacing, dst_w)
-        grid_ys = _grid_lines(y0, placard_h + spacing, dst_h)
+        # Grid step uses the raw detected size (not the scaled slot size) so the
+        # grid stays fixed when placard_scale changes. Fall back to slot size if
+        # no detected size is provided.
+        step_x = (grid_w if grid_w and grid_w > 0 else placard_w) + spacing
+        step_y = (grid_h if grid_h and grid_h > 0 else placard_h) + spacing
+        grid_xs = _grid_lines(x0, step_x, dst_w)
+        grid_ys = _grid_lines(y0, step_y, dst_h)
 
     quads: list[list[list[float]]] = []
 
@@ -399,6 +405,12 @@ def estimate_total_capacity(
             default_placard_w, default_placard_h = detected
             size_from_detections = True
 
+    # Keep the raw (unscaled) detected size for grid anchoring.
+    # The grid is fixed to the real placard footprint; placard_scale only
+    # changes the size of the *proposed* cyan rectangles, not the grid step.
+    detected_placard_w = default_placard_w
+    detected_placard_h = default_placard_h
+
     placard_w = max(1, int(default_placard_w * placard_scale))
     placard_h = max(1, int(default_placard_h * placard_scale))
 
@@ -430,6 +442,8 @@ def estimate_total_capacity(
                 global_reserved=global_reserved,
                 sign_homography=sign_homography,
                 placard_predictions=placard_predictions if placard_predictions else None,
+                grid_w=detected_placard_w,
+                grid_h=detected_placard_h,
             )
             count = len(quad_placements)
             used_perspective = True
@@ -456,6 +470,8 @@ def estimate_total_capacity(
         "per_region":            per_region,
         "placard_w":             placard_w,
         "placard_h":             placard_h,
+        "detected_placard_w":    detected_placard_w,
+        "detected_placard_h":    detected_placard_h,
         "used_perspective_mode": any_perspective,
         "sign_quad":             sign_quad,
         "sign_polygon":          sign_polygon,
