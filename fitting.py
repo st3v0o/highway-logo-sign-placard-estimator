@@ -124,6 +124,20 @@ def place_rectangles_in_region(
 # Perspective-aware placement
 # ---------------------------------------------------------------------------
 
+def _grid_lines(origin: float, step: int, limit: int) -> list[float]:
+    """Return all grid line positions within [0, limit] anchored at origin."""
+    lines: list[float] = []
+    pos = origin
+    while pos <= limit:
+        lines.append(pos)
+        pos += step
+    pos = origin - step
+    while pos >= 0:
+        lines.append(pos)
+        pos -= step
+    return sorted(lines)
+
+
 def place_rectangles_perspective_aware(
     region_pred: dict,
     placard_w: int,
@@ -134,12 +148,19 @@ def place_rectangles_perspective_aware(
     margin: int = 0,
     global_reserved: np.ndarray | None = None,
     sign_homography: tuple | None = None,
+    placard_predictions: list[dict] | None = None,
 ) -> list[list[list[float]]]:
     """
     Perspective-aware placement for a single empty region.
 
-    Uses the sign homography (derived from the Blue-Logo-Sign polygon) to warp
-    the region to flat space, fits rectangles greedily, then warps corners back.
+    When placard_predictions are provided, placements are snapped to the grid
+    defined by the median detected-placard centre (warped to flat space) and
+    the placard_w / placard_h step size.  Only positions where a vertical AND a
+    horizontal grid line cross through the centre of the proposed placard are
+    attempted (satisfying the "at least one grid line through the middle"
+    requirement with exact alignment).
+
+    Falls back to a greedy dense scan when no placard anchor is available.
     Returns a list of quads — each quad is 4 [x, y] pairs in image space.
     """
     import cv2
@@ -164,19 +185,59 @@ def place_rectangles_perspective_aware(
         kernel = np.ones((2 * margin + 1, 2 * margin + 1), dtype=np.uint8)
         warped_mask = _safe_erode(warped_mask, kernel)
 
-    flat_placements = place_rectangles_in_region(
-        warped_mask, placard_w, placard_h, spacing=spacing
-    )
+    # Build grid anchor from detected placard centres (warped to flat space)
+    grid_xs: list[float] | None = None
+    grid_ys: list[float] | None = None
+    if placard_predictions and placard_w > 0 and placard_h > 0:
+        centres = np.array(
+            [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
+        ).reshape(-1, 1, 2)
+        flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
+        x0 = float(np.median(flat_centres[:, 0]))
+        y0 = float(np.median(flat_centres[:, 1]))
+        grid_xs = _grid_lines(x0, placard_w, dst_w)
+        grid_ys = _grid_lines(y0, placard_h, dst_h)
 
     quads: list[list[list[float]]] = []
-    for (x1, y1, x2, y2) in flat_placements:
-        corners = np.array(
-            [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32
-        ).reshape(-1, 1, 2)
-        warped_corners = cv2.perspectiveTransform(corners, H_inv).reshape(-1, 2)
-        quads.append(warped_corners.tolist())
-        if global_reserved is not None:
-            cv2.fillConvexPoly(global_reserved, warped_corners.astype(np.int32), 1)
+
+    if grid_xs is not None and grid_ys is not None:
+        # Grid-snapped placement: try every grid intersection (x_line, y_line)
+        # where the placard centre lands on both a vertical and horizontal grid line.
+        available = warped_mask.copy()
+        for y_line in grid_ys:
+            y1 = int(round(y_line - placard_h / 2))
+            y2 = y1 + placard_h
+            if y1 < 0 or y2 > dst_h:
+                continue
+            for x_line in grid_xs:
+                x1 = int(round(x_line - placard_w / 2))
+                x2 = x1 + placard_w
+                if x1 < 0 or x2 > dst_w:
+                    continue
+                if not can_place_rectangle(available, x1, y1, placard_w, placard_h):
+                    continue
+                corners = np.array(
+                    [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32
+                ).reshape(-1, 1, 2)
+                warped_corners = cv2.perspectiveTransform(corners, H_inv).reshape(-1, 2)
+                quads.append(warped_corners.tolist())
+                # Mark flat space as used so we don't double-place
+                available[y1:y2, x1:x2] = 0
+                if global_reserved is not None:
+                    cv2.fillConvexPoly(global_reserved, warped_corners.astype(np.int32), 1)
+    else:
+        # Fallback: greedy dense scan
+        flat_placements = place_rectangles_in_region(
+            warped_mask, placard_w, placard_h, spacing=spacing
+        )
+        for (x1, y1, x2, y2) in flat_placements:
+            corners = np.array(
+                [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32
+            ).reshape(-1, 1, 2)
+            warped_corners = cv2.perspectiveTransform(corners, H_inv).reshape(-1, 2)
+            quads.append(warped_corners.tolist())
+            if global_reserved is not None:
+                cv2.fillConvexPoly(global_reserved, warped_corners.astype(np.int32), 1)
 
     return quads
 
@@ -346,6 +407,7 @@ def estimate_total_capacity(
                 spacing=spacing, margin=margin,
                 global_reserved=global_reserved,
                 sign_homography=sign_homography,
+                placard_predictions=placard_predictions if placard_predictions else None,
             )
             count = len(quad_placements)
             used_perspective = True
