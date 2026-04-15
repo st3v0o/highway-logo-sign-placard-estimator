@@ -57,6 +57,7 @@ DEFAULTS = {
     "default_placard_w":      90,
     "default_placard_h":      70,
     "placard_scale":          100,
+    "grid_cell_scale":        85,
     "empty_space_scale":      100,
     "outer_margin":           8,
     "spacing":                4,
@@ -192,7 +193,11 @@ with st.sidebar:
                                         key="default_placard_h")
     placard_scale = st.slider(
         "Placard scale (%)", min_value=30, max_value=100, step=5, key="placard_scale",
-        help="Scales the fitting rectangle relative to the default size.",
+        help="Scales the proposed (cyan) placard rectangles relative to the detected size.",
+    )
+    grid_cell_scale = st.slider(
+        "Grid cell scale (%)", min_value=50, max_value=100, step=5, key="grid_cell_scale",
+        help="Shrinks the grid column width and row height relative to the detected placard size.",
     )
     empty_space_scale = st.slider(
         "Empty-space scale (%)", min_value=30, max_value=100, step=5, key="empty_space_scale",
@@ -237,6 +242,7 @@ with st.sidebar:
             "default_placard_w":        int(st.session_state.default_placard_w),
             "default_placard_h":        int(st.session_state.default_placard_h),
             "placard_scale":            int(st.session_state.placard_scale),
+            "grid_cell_scale":          int(st.session_state.grid_cell_scale),
             "empty_space_scale":        int(st.session_state.empty_space_scale),
             "outer_margin":             int(st.session_state.outer_margin),
             "spacing":                  int(st.session_state.spacing),
@@ -302,6 +308,7 @@ def _current_fitting_params() -> dict:
         "default_placard_w":        int(st.session_state.default_placard_w),
         "default_placard_h":        int(st.session_state.default_placard_h),
         "placard_scale":            int(st.session_state.placard_scale),
+        "grid_cell_scale":          int(st.session_state.grid_cell_scale),
         "empty_space_scale":        int(st.session_state.empty_space_scale),
         "outer_margin":             int(st.session_state.outer_margin),
         "spacing":                  int(st.session_state.spacing),
@@ -346,6 +353,7 @@ def _run_fitting(
         spacing=params["spacing"],
         min_confidence=0.0,
         placard_scale=params["placard_scale"] / 100.0,
+        grid_cell_scale=params["grid_cell_scale"] / 100.0,
         empty_space_scale=params["empty_space_scale"] / 100.0,
         sign_prediction=sign_pred,
         placard_predictions=placard_pred_list,
@@ -363,8 +371,8 @@ def _run_fitting(
         placard_w=results.get("placard_w"),
         placard_h=results.get("placard_h"),
         spacing=params["spacing"],
-        grid_w=results.get("detected_placard_w"),
-        grid_h=results.get("detected_placard_h"),
+        grid_w=results.get("grid_w"),
+        grid_h=results.get("grid_h"),
     )
     annotated_bytes = _to_jpeg_bytes(annotated_rgb)
 
@@ -379,8 +387,8 @@ def _run_fitting(
             placard_w=results.get("placard_w"),
             placard_h=results.get("placard_h"),
             spacing=params["spacing"],
-            grid_w=results.get("detected_placard_w"),
-            grid_h=results.get("detected_placard_h"),
+            grid_w=results.get("grid_w"),
+            grid_h=results.get("grid_h"),
             min_confidence=0.0,
         )
         flat_bytes = _to_jpeg_bytes(flat_pil)

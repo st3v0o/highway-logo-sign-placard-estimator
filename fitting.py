@@ -385,6 +385,7 @@ def estimate_total_capacity(
     spacing: int = 4,
     min_confidence: float = 0.4,
     placard_scale: float = 1.0,
+    grid_cell_scale: float = 1.0,
     empty_space_scale: float = 1.0,
     sign_prediction: dict | None = None,
     placard_predictions: list[dict] | None = None,
@@ -433,11 +434,16 @@ def estimate_total_capacity(
             default_placard_w, default_placard_h = detected
             size_from_detections = True
 
-    # Keep the raw (unscaled) detected size for grid anchoring.
-    # The grid is fixed to the real placard footprint; placard_scale only
-    # changes the size of the *proposed* cyan rectangles, not the grid step.
+    # Keep the raw (unscaled) detected size for grid anchoring, then apply the
+    # grid_cell_scale to get the actual cell pitch.
+    # - detected_placard_w/h: raw size returned by the estimator (stored for export)
+    # - grid_w/h: cell pitch used for columns/rows (raw × grid_cell_scale)
+    # - placard_w/h: proposed cyan rectangle size (raw × placard_scale)
     detected_placard_w = default_placard_w
     detected_placard_h = default_placard_h
+
+    grid_w = max(1, int(detected_placard_w * grid_cell_scale))
+    grid_h = max(1, int(detected_placard_h * grid_cell_scale))
 
     placard_w = max(1, int(default_placard_w * placard_scale))
     placard_h = max(1, int(default_placard_h * placard_scale))
@@ -470,8 +476,8 @@ def estimate_total_capacity(
                 global_reserved=global_reserved,
                 sign_homography=sign_homography,
                 placard_predictions=placard_predictions if placard_predictions else None,
-                grid_w=detected_placard_w,
-                grid_h=detected_placard_h,
+                grid_w=grid_w,
+                grid_h=grid_h,
             )
             count = len(quad_placements)
             used_perspective = True
@@ -500,6 +506,8 @@ def estimate_total_capacity(
         "placard_h":             placard_h,
         "detected_placard_w":    detected_placard_w,
         "detected_placard_h":    detected_placard_h,
+        "grid_w":                grid_w,
+        "grid_h":                grid_h,
         "used_perspective_mode": any_perspective,
         "sign_quad":             sign_quad,
         "sign_polygon":          sign_polygon,
