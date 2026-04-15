@@ -337,7 +337,7 @@ def render_annotated_image(
             placard_h=placard_h,
         )
 
-    outline_pts = sign_polygon or sign_quad
+    outline_pts = sign_quad or sign_polygon
     if outline_pts:
         img = draw_sign_quad(img, outline_pts)
 
