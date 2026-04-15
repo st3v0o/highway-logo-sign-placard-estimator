@@ -141,59 +141,13 @@ def draw_sign_corner_grid(
     flat    = cv2.warpPerspective(img, M, (fw, fh))
     overlay = flat.copy()
 
-    # --- Decide grid line positions ---
-    use_anchored = (
-        placard_predictions
-        and placard_w and placard_w > 0
-        and placard_h and placard_h > 0
-    )
-
-    if use_anchored:
-        # Anchor at the median centre of detected placards so a grid line always
-        # passes through each existing placard.
-        centres = np.array(
-            [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
-        ).reshape(-1, 1, 2)
-        flat_centres = cv2.perspectiveTransform(centres, M).reshape(-1, 2)
-        xp = float(np.median(flat_centres[:, 0]))
-        yp = float(np.median(flat_centres[:, 1]))
-        cx = fw / 2.0
-        cy = fh / 2.0
-
-        def _expand(origin: float, step: float, limit: int) -> list[int]:
-            positions = []
-            pos = origin
-            while pos <= limit:
-                positions.append(int(round(pos)))
-                pos += step
-            pos = origin - step
-            while pos >= 0:
-                positions.append(int(round(pos)))
-                pos -= step
-            return sorted(set(positions))
-
-        # Minimum spacing for the regular grid.
-        _min_pw = float(
-            min((p["width"] for p in placard_predictions), default=0)
-            or (grid_w if grid_w and grid_w > 0 else (placard_w or 1))
-        )
-        step_x = max(abs(xp - cx), _min_pw)
-        step_y = max(abs(yp - cy), _min_pw / 2.0)
-        raw_xs = _expand(cx, step_x, fw)
-        raw_ys = _expand(cy, step_y, fh)
-        # Snap the nearest regular line to the exact placard centre — exactly
-        # one line through the placard, no extras.
-        def _snap(lines, target):
-            if not lines:
-                return lines
-            nearest = min(lines, key=lambda v: abs(v - target))
-            return sorted(set([target if v == nearest else v for v in lines]))
-        xs = _snap(raw_xs, int(round(xp)))
-        ys = _snap(raw_ys, int(round(yp)))
-    else:
-        # Fallback: uniform 10 × 6 grid
-        xs = [int(i * fw / 10) for i in range(11)]
-        ys = [int(j * fh / 6)  for j in range(7)]
+    # Simple uniform grid — step = placard size + spacing gap.
+    _pw = max(1, placard_w or 1)
+    _ph = max(1, placard_h or 1)
+    step_x = max(1, _pw + spacing)
+    step_y = max(1, _ph + spacing)
+    xs = list(range(0, fw + 1, step_x))
+    ys = list(range(0, fh + 1, step_y))
 
     for x in xs:
         cv2.line(overlay, (x, 0), (x, fh), COLOR_GRID, 2, cv2.LINE_AA)
@@ -246,52 +200,13 @@ def render_flat_annotated_image(
     flat = cv2.warpPerspective(img_bgr, H, (dst_w, dst_h), flags=cv2.INTER_LANCZOS4)
 
     # --- Grid lines ---
-    use_anchored = (
-        placard_predictions
-        and placard_w and placard_w > 0
-        and placard_h and placard_h > 0
-    )
-    if use_anchored:
-        # Anchor at the median centre of detected placards.
-        centres = np.array(
-            [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
-        ).reshape(-1, 1, 2)
-        flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
-        xp = float(np.median(flat_centres[:, 0]))
-        yp = float(np.median(flat_centres[:, 1]))
-        cx = dst_w / 2.0
-        cy = dst_h / 2.0
-
-        def _expand(origin: float, step: float, limit: int) -> list[int]:
-            positions: list[int] = []
-            pos = origin
-            while pos <= limit:
-                positions.append(int(round(pos)))
-                pos += step
-            pos = origin - step
-            while pos >= 0:
-                positions.append(int(round(pos)))
-                pos -= step
-            return sorted(set(positions))
-
-        _min_pw = float(
-            min((p["width"] for p in placard_predictions), default=0)
-            or (grid_w if grid_w and grid_w > 0 else (placard_w or 1))
-        )
-        step_x = max(abs(xp - cx), _min_pw)
-        step_y = max(abs(yp - cy), _min_pw / 2.0)
-        raw_xs = _expand(cx, step_x, dst_w)
-        raw_ys = _expand(cy, step_y, dst_h)
-        def _snap(lines, target):
-            if not lines:
-                return lines
-            nearest = min(lines, key=lambda v: abs(v - target))
-            return sorted(set([target if v == nearest else v for v in lines]))
-        xs = _snap(raw_xs, int(round(xp)))
-        ys = _snap(raw_ys, int(round(yp)))
-    else:
-        xs = [int(i * dst_w / 10) for i in range(11)]
-        ys = [int(j * dst_h / 6)  for j in range(7)]
+    # Simple uniform grid — step = placard size + spacing gap.
+    _pw = max(1, placard_w or 1)
+    _ph = max(1, placard_h or 1)
+    step_x = max(1, _pw + spacing)
+    step_y = max(1, _ph + spacing)
+    xs = list(range(0, dst_w + 1, step_x))
+    ys = list(range(0, dst_h + 1, step_y))
 
     overlay = flat.copy()
     for x in xs:
