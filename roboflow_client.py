@@ -22,11 +22,28 @@ from PIL import Image
 SIGN_CLASS     = "Blue-Logo-Sign"
 EXIT_CAP_CLASS = "Exit Cap"
 EMPTY_CLASS    = "empty-space"
+PLACARD_CLASS  = "placard"          # generic — model may return any class name
 
 
 # ---------------------------------------------------------------------------
 # Mock responses (used when Mock Mode is ON)
 # ---------------------------------------------------------------------------
+
+MOCK_PLACARD_RESPONSE: dict[str, Any] = {
+    "predictions": [
+        {
+            "class": PLACARD_CLASS,
+            "x": 468, "y": 205, "width": 148, "height": 132,
+            "confidence": 0.91,
+        },
+        {
+            "class": PLACARD_CLASS,
+            "x": 350, "y": 330, "width": 152, "height": 128,
+            "confidence": 0.87,
+        },
+    ],
+    "image": {"width": 640, "height": 480},
+}
 
 MOCK_SIGN_RESPONSE: dict[str, Any] = {
     "predictions": [
@@ -120,4 +137,18 @@ def call_empty_space_model(
     confidence: float = 0.4,
 ) -> dict[str, Any]:
     """Call the empty-space detection model. Returns raw Roboflow JSON."""
+    return _call(pil_image, api_key, project_id, version, confidence)
+
+
+def call_placard_model(
+    pil_image: Image.Image,
+    api_key: str,
+    project_id: str,
+    version: int,
+    confidence: float = 0.3,
+) -> dict[str, Any]:
+    """
+    Call the placard detection model.
+    Detected placard dimensions are used to derive the template size for new slots.
+    """
     return _call(pil_image, api_key, project_id, version, confidence)

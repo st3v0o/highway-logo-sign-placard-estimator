@@ -25,8 +25,10 @@ from PIL import Image
 from roboflow_client import (
     call_sign_model,
     call_empty_space_model,
+    call_placard_model,
     MOCK_SIGN_RESPONSE,
     MOCK_EMPTY_SPACE_RESPONSE,
+    MOCK_PLACARD_RESPONSE,
     SIGN_CLASS,
     EMPTY_CLASS,
 )
@@ -41,19 +43,22 @@ from visualize import render_annotated_image
 SETTINGS_FILE = "settings.json"
 
 DEFAULTS = {
-    "api_key":          "",
-    "sign_project":     "blue-logo-sign",
-    "sign_version":     1,
-    "empty_project":    "empty-blue-space",
-    "empty_version":    2,
-    "mock_mode":        True,
-    "default_placard_w": 90,
-    "default_placard_h": 70,
-    "placard_scale":    100,
-    "empty_space_scale": 100,
-    "outer_margin":     8,
-    "spacing":          4,
-    "min_confidence":   0.4,
+    "api_key":                "",
+    "sign_project":           "blue-logo-sign",
+    "sign_version":           1,
+    "empty_project":          "empty-blue-space",
+    "empty_version":          2,
+    "placard_project":        "placard-condition-assessment",
+    "placard_version":        12,
+    "estimate_from_detections": True,
+    "mock_mode":              True,
+    "default_placard_w":      90,
+    "default_placard_h":      70,
+    "placard_scale":          100,
+    "empty_space_scale":      100,
+    "outer_margin":           8,
+    "spacing":                4,
+    "min_confidence":         0.4,
 }
 
 
@@ -127,6 +132,19 @@ with st.sidebar:
                                     key="empty_version", disabled=mock_mode)
 
     st.divider()
+    st.subheader("Placard Detector Model")
+    st.caption("Detects existing placards to measure the standard placard size.")
+    placard_project = st.text_input("Project ID", key="placard_project", disabled=mock_mode)
+    placard_version = st.number_input("Version", min_value=1, step=1,
+                                      key="placard_version", disabled=mock_mode)
+    estimate_from_detections = st.checkbox(
+        "Use detected placard size for fitting",
+        key="estimate_from_detections",
+        help="When checked, the median size of detected existing placards sets "
+             "the template size for new slots. Overrides the manual default below.",
+    )
+
+    st.divider()
     st.subheader("Placard Size")
     default_placard_w = st.number_input("Default width (px)",  min_value=10, step=5,
                                         key="default_placard_w")
@@ -158,19 +176,22 @@ with st.sidebar:
     st.divider()
     if st.button("Save Settings", use_container_width=True):
         save_settings({
-            "api_key":           st.session_state.api_key,
-            "sign_project":      st.session_state.sign_project,
-            "sign_version":      int(st.session_state.sign_version),
-            "empty_project":     st.session_state.empty_project,
-            "empty_version":     int(st.session_state.empty_version),
-            "mock_mode":         st.session_state.mock_mode,
-            "default_placard_w": int(st.session_state.default_placard_w),
-            "default_placard_h": int(st.session_state.default_placard_h),
-            "placard_scale":     int(st.session_state.placard_scale),
-            "empty_space_scale": int(st.session_state.empty_space_scale),
-            "outer_margin":      int(st.session_state.outer_margin),
-            "spacing":           int(st.session_state.spacing),
-            "min_confidence":    float(st.session_state.min_confidence),
+            "api_key":                  st.session_state.api_key,
+            "sign_project":             st.session_state.sign_project,
+            "sign_version":             int(st.session_state.sign_version),
+            "empty_project":            st.session_state.empty_project,
+            "empty_version":            int(st.session_state.empty_version),
+            "placard_project":          st.session_state.placard_project,
+            "placard_version":          int(st.session_state.placard_version),
+            "estimate_from_detections": bool(st.session_state.estimate_from_detections),
+            "mock_mode":                st.session_state.mock_mode,
+            "default_placard_w":        int(st.session_state.default_placard_w),
+            "default_placard_h":        int(st.session_state.default_placard_h),
+            "placard_scale":            int(st.session_state.placard_scale),
+            "empty_space_scale":        int(st.session_state.empty_space_scale),
+            "outer_margin":             int(st.session_state.outer_margin),
+            "spacing":                  int(st.session_state.spacing),
+            "min_confidence":           float(st.session_state.min_confidence),
         })
         st.success("Settings saved!")
 
@@ -200,13 +221,14 @@ def _to_jpeg_bytes(img, quality: int = 82) -> bytes:
 
 def _current_fitting_params() -> dict:
     return {
-        "default_placard_w":  int(st.session_state.default_placard_w),
-        "default_placard_h":  int(st.session_state.default_placard_h),
-        "placard_scale":      int(st.session_state.placard_scale),
-        "empty_space_scale":  int(st.session_state.empty_space_scale),
-        "outer_margin":       int(st.session_state.outer_margin),
-        "spacing":            int(st.session_state.spacing),
-        "min_confidence":     float(st.session_state.min_confidence),
+        "default_placard_w":        int(st.session_state.default_placard_w),
+        "default_placard_h":        int(st.session_state.default_placard_h),
+        "placard_scale":            int(st.session_state.placard_scale),
+        "empty_space_scale":        int(st.session_state.empty_space_scale),
+        "outer_margin":             int(st.session_state.outer_margin),
+        "spacing":                  int(st.session_state.spacing),
+        "min_confidence":           float(st.session_state.min_confidence),
+        "estimate_from_detections": bool(st.session_state.estimate_from_detections),
     }
 
 
@@ -230,6 +252,7 @@ def _run_fitting(
     pil_image: Image.Image,
     sign_pred: dict | None,
     empty_predictions: list[dict],
+    placard_pred_list: list[dict],
     params: dict,
 ) -> tuple[bytes, dict]:
     """Run fitting + render. Returns (annotated_jpeg_bytes, results_dict)."""
@@ -247,11 +270,13 @@ def _run_fitting(
         placard_scale=params["placard_scale"] / 100.0,
         empty_space_scale=params["empty_space_scale"] / 100.0,
         sign_prediction=sign_pred,
+        placard_predictions=placard_pred_list,
+        estimate_from_detections=params["estimate_from_detections"],
     )
 
     annotated_rgb = render_annotated_image(
         pil_image=pil_image,
-        placard_predictions=[],
+        placard_predictions=placard_pred_list,
         empty_space_predictions=empty_predictions,
         per_region=results["per_region"],
         min_confidence=0.0,
@@ -262,6 +287,11 @@ def _run_fitting(
     return annotated_bytes, results
 
 
+def _placard_preds(placard_resp: dict, conf: float) -> list[dict]:
+    return [p for p in placard_resp.get("predictions", [])
+            if p.get("confidence", 0) >= conf]
+
+
 def _run_inference_on_image(pil_image: Image.Image, sign_id: str) -> dict:
     """Full inference pipeline for a single image. Returns a result item dict."""
     pil_image = _resize_for_display(pil_image)
@@ -269,21 +299,27 @@ def _run_inference_on_image(pil_image: Image.Image, sign_id: str) -> dict:
     conf = min_confidence
 
     if mock_mode:
-        sign_resp  = MOCK_SIGN_RESPONSE
-        empty_resp = MOCK_EMPTY_SPACE_RESPONSE
-        used_mock  = True
+        sign_resp    = MOCK_SIGN_RESPONSE
+        empty_resp   = MOCK_EMPTY_SPACE_RESPONSE
+        placard_resp = MOCK_PLACARD_RESPONSE
+        used_mock    = True
     else:
         sign_resp  = call_sign_model(
             pil_image, api_key, sign_project, int(sign_version), confidence=conf)
         empty_resp = call_empty_space_model(
             pil_image, api_key, empty_project, int(empty_version), confidence=conf)
+        placard_resp = call_placard_model(
+            pil_image, api_key, placard_project, int(placard_version), confidence=conf)
         used_mock = False
 
-    sign_pred    = _best_sign_pred(sign_resp, conf)
-    empty_pred_list = _empty_preds(empty_resp, conf)
-    params       = _current_fitting_params()
+    sign_pred        = _best_sign_pred(sign_resp, conf)
+    empty_pred_list  = _empty_preds(empty_resp, conf)
+    placard_pred_list = _placard_preds(placard_resp, conf)
+    params           = _current_fitting_params()
 
-    annotated_bytes, results = _run_fitting(pil_image, sign_pred, empty_pred_list, params)
+    annotated_bytes, results = _run_fitting(
+        pil_image, sign_pred, empty_pred_list, placard_pred_list, params
+    )
 
     region_rows = [
         {"Region": f"Region {r['region_index'] + 1}", "Placards fit": r["count"]}
@@ -291,32 +327,39 @@ def _run_inference_on_image(pil_image: Image.Image, sign_id: str) -> dict:
     ]
 
     return {
-        "sign_id":         sign_id,
-        "annotated_bytes": annotated_bytes,
-        "total_fit":       results["total_fit"],
-        "placard_w":       results["placard_w"],
-        "placard_h":       results["placard_h"],
-        "n_empty_det":     len(empty_pred_list),
-        "n_regions_fit":   sum(1 for r in results["per_region"] if r["count"] > 0),
-        "region_rows":     region_rows,
-        "sign_detected":   sign_pred is not None,
-        "mock_mode":       used_mock,
-        "_sign_resp":      sign_resp,
-        "_empty_resp":     empty_resp,
-        "_sign_pred":      sign_pred,
-        "_img_bytes":      img_bytes,
-        "_fitting_params": params,
+        "sign_id":              sign_id,
+        "annotated_bytes":      annotated_bytes,
+        "total_fit":            results["total_fit"],
+        "placard_w":            results["placard_w"],
+        "placard_h":            results["placard_h"],
+        "n_empty_det":          len(empty_pred_list),
+        "n_placard_det":        len(placard_pred_list),
+        "n_regions_fit":        sum(1 for r in results["per_region"] if r["count"] > 0),
+        "region_rows":          region_rows,
+        "sign_detected":        sign_pred is not None,
+        "size_from_detections": results.get("size_from_detections", False),
+        "mock_mode":            used_mock,
+        "_sign_resp":           sign_resp,
+        "_empty_resp":          empty_resp,
+        "_placard_resp":        placard_resp,
+        "_sign_pred":           sign_pred,
+        "_placard_pred_list":   placard_pred_list,
+        "_img_bytes":           img_bytes,
+        "_fitting_params":      params,
     }
 
 
 def _refit_result_item(item: dict, params: dict) -> dict:
     """Re-run fitting with new params using cached predictions (no API call)."""
     conf = params["min_confidence"]
-    sign_pred       = item["_sign_pred"]
-    empty_pred_list = _empty_preds(item["_empty_resp"], conf)
+    sign_pred         = item["_sign_pred"]
+    empty_pred_list   = _empty_preds(item["_empty_resp"], conf)
+    placard_pred_list = item.get("_placard_pred_list", [])
 
     pil_image = Image.open(BytesIO(item["_img_bytes"])).convert("RGB")
-    annotated_bytes, results = _run_fitting(pil_image, sign_pred, empty_pred_list, params)
+    annotated_bytes, results = _run_fitting(
+        pil_image, sign_pred, empty_pred_list, placard_pred_list, params
+    )
 
     region_rows = [
         {"Region": f"Region {r['region_index'] + 1}", "Placards fit": r["count"]}
@@ -325,14 +368,15 @@ def _refit_result_item(item: dict, params: dict) -> dict:
 
     return {
         **item,
-        "annotated_bytes": annotated_bytes,
-        "total_fit":       results["total_fit"],
-        "placard_w":       results["placard_w"],
-        "placard_h":       results["placard_h"],
-        "n_regions_fit":   sum(1 for r in results["per_region"] if r["count"] > 0),
-        "region_rows":     region_rows,
-        "n_empty_det":     len(empty_pred_list),
-        "_fitting_params": params,
+        "annotated_bytes":      annotated_bytes,
+        "total_fit":            results["total_fit"],
+        "placard_w":            results["placard_w"],
+        "placard_h":            results["placard_h"],
+        "n_regions_fit":        sum(1 for r in results["per_region"] if r["count"] > 0),
+        "region_rows":          region_rows,
+        "n_empty_det":          len(empty_pred_list),
+        "size_from_detections": results.get("size_from_detections", False),
+        "_fitting_params":      params,
     }
 
 
@@ -349,7 +393,12 @@ def _render_results(results_list: list) -> None:
 
         col_img, col_stats = st.columns([3, 1])
         with col_img:
-            st.caption("**Cyan** = proposed new placard slots  |  **Orange** = detected empty regions  |  **Yellow** = sign boundary")
+            st.caption(
+                "**Cyan** = proposed new placard slots  |  "
+                "**Orange** = detected empty regions  |  "
+                "**Green** = detected existing placards  |  "
+                "**Yellow** = sign boundary"
+            )
             st.image(item["annotated_bytes"], use_container_width=True)
 
         with col_stats:
@@ -360,13 +409,22 @@ def _render_results(results_list: list) -> None:
                 delta=f"across {n} region(s)" if n else None,
                 delta_color="off",
             )
-            st.metric("Placard Width (px)",  item["placard_w"])
-            st.metric("Placard Height (px)", item["placard_h"])
+            size_label = "Placard Width (px)"
+            if item.get("size_from_detections"):
+                size_label += " ✦"
+            st.metric(size_label, item["placard_w"])
+            size_label_h = "Placard Height (px)"
+            if item.get("size_from_detections"):
+                size_label_h += " ✦"
+            st.metric(size_label_h, item["placard_h"])
+            if item.get("size_from_detections"):
+                st.caption("✦ Size derived from detected existing placards")
 
         with st.expander("📊 Details"):
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             c1.metric("Empty Regions Detected", item["n_empty_det"])
-            c2.metric("Regions with Fits",      item["n_regions_fit"])
+            c2.metric("Existing Placards Found", item.get("n_placard_det", 0))
+            c3.metric("Regions with Fits",       item["n_regions_fit"])
             if item["region_rows"]:
                 st.table(item["region_rows"])
 
@@ -374,6 +432,8 @@ def _render_results(results_list: list) -> None:
             st.json(item["_sign_resp"])
         with st.expander("Raw JSON — Empty-Space Model"):
             st.json(item["_empty_resp"])
+        with st.expander("Raw JSON — Placard Detector"):
+            st.json(item.get("_placard_resp", {}))
 
 
 # ---------------------------------------------------------------------------

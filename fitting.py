@@ -182,6 +182,82 @@ def place_rectangles_perspective_aware(
 
 
 # ---------------------------------------------------------------------------
+# Placard-size estimation from detections
+# ---------------------------------------------------------------------------
+
+def estimate_placard_size_from_detections(
+    placard_predictions: list[dict],
+    sign_quad: list[dict] | None,
+    min_confidence: float = 0.3,
+) -> tuple[int, int] | None:
+    """
+    Derive the placard template size (width, height) from existing placard detections.
+
+    When a sign quad is provided the placard bboxes are first warped into
+    perspective-corrected flat space so the measurement is view-angle independent.
+    Falls back to raw pixel dimensions when no homography is available.
+
+    Returns (median_w, median_h) in pixels, or None if no usable detections.
+    """
+    import cv2
+
+    valid = [
+        p for p in placard_predictions
+        if p.get("confidence", 0) >= min_confidence
+    ]
+    if not valid:
+        return None
+
+    H: np.ndarray | None = None
+    if sign_quad and len(sign_quad) == 4:
+        pts = np.array([[p["x"], p["y"]] for p in sign_quad], dtype=np.float32)
+        from geometry import order_points
+        src = order_points(pts)
+        w_top  = float(np.linalg.norm(src[1] - src[0]))
+        w_bot  = float(np.linalg.norm(src[2] - src[3]))
+        h_left = float(np.linalg.norm(src[3] - src[0]))
+        h_right= float(np.linalg.norm(src[2] - src[1]))
+        dst_w  = max(1, int(max(w_top, w_bot)))
+        dst_h  = max(1, int(max(h_left, h_right)))
+        dst    = np.array([[0, 0], [dst_w - 1, 0], [dst_w - 1, dst_h - 1], [0, dst_h - 1]], dtype=np.float32)
+        H = cv2.getPerspectiveTransform(src, dst)
+
+    widths: list[float] = []
+    heights: list[float] = []
+
+    for p in valid:
+        cx, cy = p["x"], p["y"]
+        pw, ph = p["width"], p["height"]
+        x1, y1 = cx - pw / 2, cy - ph / 2
+        x2, y2 = cx + pw / 2, cy + ph / 2
+
+        if H is not None:
+            corners = np.array(
+                [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32
+            ).reshape(-1, 1, 2)
+            flat = cv2.perspectiveTransform(corners, H).reshape(-1, 2)
+            mw = float(max(
+                np.linalg.norm(flat[1] - flat[0]),
+                np.linalg.norm(flat[2] - flat[3]),
+            ))
+            mh = float(max(
+                np.linalg.norm(flat[3] - flat[0]),
+                np.linalg.norm(flat[2] - flat[1]),
+            ))
+        else:
+            mw, mh = float(pw), float(ph)
+
+        if mw > 5 and mh > 5:
+            widths.append(mw)
+            heights.append(mh)
+
+    if not widths:
+        return None
+
+    return int(round(float(np.median(widths)))), int(round(float(np.median(heights))))
+
+
+# ---------------------------------------------------------------------------
 # Top-level estimator
 # ---------------------------------------------------------------------------
 
@@ -197,6 +273,8 @@ def estimate_total_capacity(
     placard_scale: float = 1.0,
     empty_space_scale: float = 1.0,
     sign_prediction: dict | None = None,
+    placard_predictions: list[dict] | None = None,
+    estimate_from_detections: bool = True,
 ) -> dict:
     """
     Estimate how many new placards can fit in the empty regions.
@@ -205,22 +283,20 @@ def estimate_total_capacity(
         Its polygon (or bbox) defines the perspective quad for all empty regions.
         When None, falls back to per-region polygon perspective or flat fitting.
 
+    placard_predictions: detections from the placard model.
+        When estimate_from_detections is True and detections are available,
+        the median perspective-corrected placard size overrides the default size.
+
     Returns:
-        total_fit           – total placard slots across all regions
-        per_region          – list of per-region result dicts
-        placard_w/h         – dimensions used (after scaling)
+        total_fit             – total placard slots across all regions
+        per_region            – list of per-region result dicts
+        placard_w/h           – dimensions used (after scaling)
         used_perspective_mode – bool
-        sign_quad           – the 4-corner sign boundary (list[dict] | None)
+        sign_quad             – the 4-corner sign boundary (list[dict] | None)
+        sign_polygon          – raw model polygon for outline drawing (list[dict] | None)
+        size_from_detections  – bool indicating whether detected size was used
     """
-    placard_w = max(1, int(default_placard_w * placard_scale))
-    placard_h = max(1, int(default_placard_h * placard_scale))
-
-    valid_regions = [
-        p for p in empty_space_predictions
-        if p.get("confidence", 0) >= min_confidence
-    ]
-
-    # Build the global sign homography once
+    # Build the sign quad first so we can use it for size estimation
     sign_quad: list[dict] | None = None
     sign_polygon: list[dict] | None = None
     sign_homography: tuple | None = None
@@ -229,6 +305,24 @@ def estimate_total_capacity(
         sign_quad = sign_quad_from_pred(sign_prediction)
         H_s, H_s_inv, dst_w_s, dst_h_s = compute_region_homography(sign_quad)
         sign_homography = (H_s, H_s_inv, dst_w_s, dst_h_s)
+
+    # Resolve placard size — use detected size when available
+    size_from_detections = False
+    if estimate_from_detections and placard_predictions:
+        detected = estimate_placard_size_from_detections(
+            placard_predictions, sign_quad, min_confidence=min_confidence
+        )
+        if detected is not None:
+            default_placard_w, default_placard_h = detected
+            size_from_detections = True
+
+    placard_w = max(1, int(default_placard_w * placard_scale))
+    placard_h = max(1, int(default_placard_h * placard_scale))
+
+    valid_regions = [
+        p for p in empty_space_predictions
+        if p.get("confidence", 0) >= min_confidence
+    ]
 
     global_reserved = np.zeros((img_h, img_w), dtype=np.uint8)
 
@@ -281,4 +375,5 @@ def estimate_total_capacity(
         "used_perspective_mode": any_perspective,
         "sign_quad":             sign_quad,
         "sign_polygon":          sign_polygon,
+        "size_from_detections":  size_from_detections,
     }
