@@ -155,10 +155,23 @@ def draw_sign_corner_grid(
             [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
         ).reshape(-1, 1, 2)
         flat_centres = cv2.perspectiveTransform(centres, M).reshape(-1, 2)
-        # Anchor at the leftmost placard (same logic as fitting.py)
-        leftmost_idx = int(np.argmin(flat_centres[:, 0]))
-        xp = float(flat_centres[leftmost_idx, 0])
-        yp = float(np.median(flat_centres[:, 1]))
+
+        sorted_x = np.sort(flat_centres[:, 0])
+        sorted_y = np.sort(flat_centres[:, 1])
+        xp = float(sorted_x[0])
+        yp = float(sorted_y[0])
+        if len(sorted_x) >= 2:
+            x_sig = np.diff(sorted_x); x_sig = x_sig[x_sig > gw * 0.3]
+            pitch_x = float(np.median(x_sig)) if len(x_sig) > 0 else gw
+            pitch_x = max(pitch_x, gw)
+        else:
+            pitch_x = gw
+        if len(sorted_y) >= 2:
+            y_sig = np.diff(sorted_y); y_sig = y_sig[y_sig > gh * 0.3]
+            pitch_y = float(np.median(y_sig)) if len(y_sig) > 0 else gh
+            pitch_y = max(pitch_y, gh)
+        else:
+            pitch_y = gh
 
         def _boundaries(centre: float, step: float, limit: int) -> list[int]:
             """Cell boundary lines: at centre ± step/2, ± 3*step/2, etc."""
@@ -173,8 +186,8 @@ def draw_sign_corner_grid(
                 pos += step
             return sorted(set(lines))
 
-        xs = _boundaries(xp, gw, fw)
-        ys = _boundaries(yp, gh, fh)
+        xs = _boundaries(xp, pitch_x, fw)
+        ys = _boundaries(yp, pitch_y, fh)
     else:
         # Fallback: uniform 10 × 6 grid
         xs = [int(i * fw / 10) for i in range(11)]
@@ -243,10 +256,23 @@ def render_flat_annotated_image(
             [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
         ).reshape(-1, 1, 2)
         flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
-        # Anchor at the leftmost placard (same logic as fitting.py)
-        leftmost_idx = int(np.argmin(flat_centres[:, 0]))
-        xp = float(flat_centres[leftmost_idx, 0])
-        yp = float(np.median(flat_centres[:, 1]))
+
+        sorted_x = np.sort(flat_centres[:, 0])
+        sorted_y = np.sort(flat_centres[:, 1])
+        xp = float(sorted_x[0])
+        yp = float(sorted_y[0])
+        if len(sorted_x) >= 2:
+            x_sig = np.diff(sorted_x); x_sig = x_sig[x_sig > gw * 0.3]
+            pitch_x = float(np.median(x_sig)) if len(x_sig) > 0 else gw
+            pitch_x = max(pitch_x, gw)
+        else:
+            pitch_x = gw
+        if len(sorted_y) >= 2:
+            y_sig = np.diff(sorted_y); y_sig = y_sig[y_sig > gh * 0.3]
+            pitch_y = float(np.median(y_sig)) if len(y_sig) > 0 else gh
+            pitch_y = max(pitch_y, gh)
+        else:
+            pitch_y = gh
 
         def _boundaries(centre: float, step: float, limit: int) -> list[int]:
             lines: list[int] = []
@@ -260,8 +286,8 @@ def render_flat_annotated_image(
                 pos += step
             return sorted(set(lines))
 
-        xs = _boundaries(xp, gw, dst_w)
-        ys = _boundaries(yp, gh, dst_h)
+        xs = _boundaries(xp, pitch_x, dst_w)
+        ys = _boundaries(yp, pitch_y, dst_h)
     else:
         xs = [int(i * dst_w / 10) for i in range(11)]
         ys = [int(j * dst_h / 6)  for j in range(7)]
@@ -343,17 +369,8 @@ def render_annotated_image(
     img_rgb = np.array(pil_image.convert("RGB"))
     img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
-    if sign_quad:
-        img = draw_sign_corner_grid(
-            img, sign_quad,
-            placard_predictions=placard_predictions if placard_predictions else None,
-            placard_w=placard_w,
-            placard_h=placard_h,
-            spacing=spacing,
-            grid_w=grid_w,
-            grid_h=grid_h,
-        )
-
+    # Grid is drawn directly on the perspective-corrected (flat) view only.
+    # No grid overlay on the annotated original-perspective view.
     outline_pts = sign_quad or sign_polygon
     if outline_pts:
         img = draw_sign_quad(img, outline_pts)

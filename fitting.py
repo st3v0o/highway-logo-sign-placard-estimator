@@ -202,17 +202,34 @@ def place_rectangles_perspective_aware(
             [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
         ).reshape(-1, 1, 2)
         flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
-        # Anchor at the LEFTMOST detected placard (not the median).
-        # Using median-x when two placards are side-by-side puts the anchor
-        # between them, pushing every column out of bounds.  The leftmost
-        # placard gives a stable, sign-edge-relative anchor; subsequent columns
-        # land at xp + gw, xp + 2gw … which fills the sign naturally.
-        leftmost_idx = int(np.argmin(flat_centres[:, 0]))
-        xp = float(flat_centres[leftmost_idx, 0])
-        yp = float(np.median(flat_centres[:, 1]))   # median row is fine
-        # Cell centres expand outward from the existing placard at cell-pitch intervals.
-        grid_xs = _grid_lines(xp, gw, dst_w)
-        grid_ys = _grid_lines(yp, gh, dst_h)
+        # Derive column/row pitch from actual centre-to-centre spacing between
+        # detected placards in flat space.  When two placards sit side-by-side
+        # their real horizontal gap is larger than gw; using gw as the pitch
+        # would put a column boundary through the second placard.  Measuring the
+        # actual spacing ensures every existing placard is centred in its column.
+        sorted_x = np.sort(flat_centres[:, 0])
+        sorted_y = np.sort(flat_centres[:, 1])
+        xp = float(sorted_x[0])   # leftmost placard = x anchor
+        yp = float(sorted_y[0])   # topmost placard  = y anchor
+
+        if len(sorted_x) >= 2:
+            x_diffs = np.diff(sorted_x)
+            x_sig = x_diffs[x_diffs > gw * 0.3]   # ignore near-zero (duplicate detections)
+            pitch_x = float(np.median(x_sig)) if len(x_sig) > 0 else gw
+            pitch_x = max(pitch_x, gw)             # pitch must fit at least one placard
+        else:
+            pitch_x = gw
+
+        if len(sorted_y) >= 2:
+            y_diffs = np.diff(sorted_y)
+            y_sig = y_diffs[y_diffs > gh * 0.3]
+            pitch_y = float(np.median(y_sig)) if len(y_sig) > 0 else gh
+            pitch_y = max(pitch_y, gh)
+        else:
+            pitch_y = gh
+
+        grid_xs = _grid_lines(xp, pitch_x, dst_w)
+        grid_ys = _grid_lines(yp, pitch_y, dst_h)
 
     quads: list[list[list[float]]] = []
 
