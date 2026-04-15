@@ -149,9 +149,14 @@ def draw_sign_corner_grid(
     )
 
     if use_anchored:
-        # Anchor at the sign centre so grid lines are equidistant from both edges.
-        x0 = fw / 2.0
-        y0 = fh / 2.0
+        # Anchor at the median centre of detected placards so a grid line always
+        # passes through each existing placard.
+        centres = np.array(
+            [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
+        ).reshape(-1, 1, 2)
+        flat_centres = cv2.perspectiveTransform(centres, M).reshape(-1, 2)
+        x0 = float(np.median(flat_centres[:, 0]))
+        y0 = float(np.median(flat_centres[:, 1]))
 
         # Build lists of line positions by expanding outward from the anchor
         def _expand(origin: float, step: int, limit: int) -> list[int]:
@@ -234,9 +239,13 @@ def render_flat_annotated_image(
         and placard_h and placard_h > 0
     )
     if use_anchored:
-        # Anchor at sign centre — equidistant from both edges.
-        x0 = dst_w / 2.0
-        y0 = dst_h / 2.0
+        # Anchor at the median centre of detected placards.
+        centres = np.array(
+            [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
+        ).reshape(-1, 1, 2)
+        flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
+        x0 = float(np.median(flat_centres[:, 0]))
+        y0 = float(np.median(flat_centres[:, 1]))
 
         def _expand(origin: float, step: int, limit: int) -> list[int]:
             positions: list[int] = []
