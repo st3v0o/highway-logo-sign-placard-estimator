@@ -65,6 +65,26 @@ def prediction_to_mask(pred: dict, img_h: int, img_w: int) -> tuple[np.ndarray, 
     return bbox_to_mask(x1, y1, x2, y2, img_h, img_w), False
 
 
+def _smooth_polygon(pts: np.ndarray, iterations: int = 8, alpha: float = 0.4) -> np.ndarray:
+    """
+    Laplacian smoothing: move each vertex towards the midpoint of its neighbours.
+    Runs for `iterations` passes. `alpha` controls how far each vertex moves (0=none, 1=full).
+    Smooths out soft bumps (like sign panels traced by the model) without
+    dramatically changing the overall sign boundary shape.
+    """
+    pts = pts.copy().astype(np.float32)
+    n = len(pts)
+    if n < 4:
+        return pts
+    for _ in range(iterations):
+        new_pts = pts.copy()
+        for i in range(n):
+            mid = 0.5 * (pts[(i - 1) % n] + pts[(i + 1) % n])
+            new_pts[i] = (1.0 - alpha) * pts[i] + alpha * mid
+        pts = new_pts
+    return pts
+
+
 def _remove_polygon_spikes(pts: np.ndarray, min_angle_deg: float = 50.0) -> np.ndarray:
     """
     Remove vertices that form sharp spikes.
@@ -111,6 +131,7 @@ def sign_polygon_from_pred(pred: dict) -> list[dict]:
     if points and len(points) >= 3:
         pts = np.array([[p["x"], p["y"]] for p in points], dtype=np.float32)
         pts = _remove_polygon_spikes(pts, min_angle_deg=60.0)
+        pts = _smooth_polygon(pts, iterations=8, alpha=0.4)
         return [{"x": float(p[0]), "y": float(p[1])} for p in pts]
     x1, y1, x2, y2 = bbox_to_xyxy(pred)
     return [
