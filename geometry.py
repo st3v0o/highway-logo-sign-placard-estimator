@@ -154,9 +154,9 @@ def sign_polygon_from_pred(pred: dict) -> list[dict]:
         pts = np.array([[p["x"], p["y"]] for p in points], dtype=np.float32)
         # Resample dense model polygons (often 600+ pts) to 60 evenly-spaced
         # points so that Laplacian smoothing can actually move bumps.
-        pts = _resample_polygon(pts, n=60)
+        pts = _resample_polygon(pts, n=80)
         pts = _remove_polygon_spikes(pts, min_angle_deg=60.0)
-        pts = _smooth_polygon(pts, iterations=15, alpha=0.5)
+        pts = _smooth_polygon(pts, iterations=6, alpha=0.3)
         return [{"x": float(p[0]), "y": float(p[1])} for p in pts]
     x1, y1, x2, y2 = bbox_to_xyxy(pred)
     return [
@@ -186,6 +186,16 @@ def sign_quad_from_pred(pred: dict) -> list[dict]:
         {"x": float(x2), "y": float(y2)},
         {"x": float(x1), "y": float(y2)},
     ]
+
+
+def sign_quad_from_polygon(polygon: list[dict]) -> list[dict]:
+    """
+    Derive a [TL, TR, BR, BL] 4-corner quad from an already-processed polygon
+    (list of {"x", "y"} dicts). Used so the perspective homography is derived
+    from the same smoothed outline shown as the yellow boundary.
+    """
+    pts = np.array([[p["x"], p["y"]] for p in polygon], dtype=np.float32)
+    return _four_extreme_hull_points(pts)
 
 
 def simplify_polygon_to_quad(points: list[dict]) -> list[dict] | None:

@@ -20,6 +20,7 @@ from geometry import (
     compute_region_homography,
     simplify_polygon_to_quad,
     sign_quad_from_pred,
+    sign_quad_from_polygon,
     sign_polygon_from_pred,
 )
 
@@ -363,7 +364,9 @@ def estimate_total_capacity(
     sign_homography: tuple | None = None
     if sign_prediction is not None:
         sign_polygon = sign_polygon_from_pred(sign_prediction)
-        sign_quad = sign_quad_from_pred(sign_prediction)
+        # Derive the quad from the already-smoothed polygon so the homography
+        # and the yellow outline both use the same boundary.
+        sign_quad = sign_quad_from_polygon(sign_polygon)
         H_s, H_s_inv, dst_w_s, dst_h_s = compute_region_homography(sign_quad)
         sign_homography = (H_s, H_s_inv, dst_w_s, dst_h_s)
 
