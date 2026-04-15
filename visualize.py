@@ -172,11 +172,10 @@ def draw_sign_corner_grid(
                 pos -= step
             return sorted(set(positions))
 
-        _GRID_GAP = 8
         _pw = placard_w if placard_w and placard_w > 0 else (grid_w or 1)
         _ph = placard_h if placard_h and placard_h > 0 else (grid_h or 1)
-        xs = _expand(x0, _pw + _GRID_GAP, fw)
-        ys = _expand(y0, _ph + _GRID_GAP, fh)
+        xs = _expand(x0, max(1, _pw + spacing), fw)
+        ys = _expand(y0, max(1, _ph + spacing), fh)
     else:
         # Fallback: uniform 10 × 6 grid
         xs = [int(i * fw / 10) for i in range(11)]
@@ -258,11 +257,10 @@ def render_flat_annotated_image(
                 pos -= step
             return sorted(set(positions))
 
-        _GRID_GAP = 8
         _pw = placard_w if placard_w and placard_w > 0 else (grid_w or 1)
         _ph = placard_h if placard_h and placard_h > 0 else (grid_h or 1)
-        xs = _expand(x0, _pw + _GRID_GAP, dst_w)
-        ys = _expand(y0, _ph + _GRID_GAP, dst_h)
+        xs = _expand(x0, max(1, _pw + spacing), dst_w)
+        ys = _expand(y0, max(1, _ph + spacing), dst_h)
     else:
         xs = [int(i * dst_w / 10) for i in range(11)]
         ys = [int(j * dst_h / 6)  for j in range(7)]
