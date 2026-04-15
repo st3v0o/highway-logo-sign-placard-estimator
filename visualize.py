@@ -172,9 +172,10 @@ def draw_sign_corner_grid(
                 pos -= step
             return sorted(set(positions))
 
+        # Grid pitch based on DETECTED (unscaled) placard size — never changes with any slider.
         _GRID_GAP = 8
-        _pw = placard_w if placard_w and placard_w > 0 else (grid_w or 1)
-        _ph = placard_h if placard_h and placard_h > 0 else (grid_h or 1)
+        _pw = grid_w if grid_w and grid_w > 0 else (placard_w or 1)
+        _ph = grid_h if grid_h and grid_h > 0 else (placard_h or 1)
         xs = _expand(x0, max(1, _pw + _GRID_GAP), fw)
         ys = _expand(y0, max(1, _ph + _GRID_GAP), fh)
     else:
@@ -258,9 +259,10 @@ def render_flat_annotated_image(
                 pos -= step
             return sorted(set(positions))
 
+        # Grid pitch based on DETECTED (unscaled) placard size — never changes with any slider.
         _GRID_GAP = 8
-        _pw = placard_w if placard_w and placard_w > 0 else (grid_w or 1)
-        _ph = placard_h if placard_h and placard_h > 0 else (grid_h or 1)
+        _pw = grid_w if grid_w and grid_w > 0 else (placard_w or 1)
+        _ph = grid_h if grid_h and grid_h > 0 else (placard_h or 1)
         xs = _expand(x0, max(1, _pw + _GRID_GAP), dst_w)
         ys = _expand(y0, max(1, _ph + _GRID_GAP), dst_h)
     else:
