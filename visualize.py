@@ -160,34 +160,30 @@ def draw_sign_corner_grid(
         cx = fw / 2.0
         cy = fh / 2.0
 
-        # Build lists of line positions by expanding outward from the anchor.
-        # max_hops caps how many steps are taken in each direction.
-        def _expand(origin: float, step: float, limit: int, max_hops=None) -> list[int]:
+        def _expand(origin: float, step: float, limit: int) -> list[int]:
             positions = []
-            pos, hop = origin, 0
-            while pos <= limit and (max_hops is None or hop <= max_hops):
+            pos = origin
+            while pos <= limit:
                 positions.append(int(round(pos)))
-                pos += step; hop += 1
-            pos, hop = origin - step, 1
-            while pos >= 0 and (max_hops is None or hop <= max_hops):
+                pos += step
+            pos = origin - step
+            while pos >= 0:
                 positions.append(int(round(pos)))
-                pos -= step; hop += 1
+                pos -= step
             return sorted(set(positions))
 
-        # Step stays locked to placard-to-centre distance (never changed —
-        # that would move the grid off the existing placard).
-        step_x = max(abs(xp - cx), 1.0)
-        step_y = max(abs(yp - cy), 1.0)
-        # Minimum spacing controls *extension* only, not the step itself.
-        # If the step is below the minimum, cap to ±1 hop → 3 symmetric lines.
+        # Minimum spacing for the regular grid.
         _min_pw = float(
             min((p["width"] for p in placard_predictions), default=0)
             or (grid_w if grid_w and grid_w > 0 else (placard_w or 1))
         )
-        max_hops_x = None if step_x >= _min_pw       else 1
-        max_hops_y = None if step_y >= _min_pw / 2.0 else 1
-        xs = _expand(cx, step_x, fw,  max_hops=max_hops_x)
-        ys = _expand(cy, step_y, fh, max_hops=max_hops_y)
+        step_x = max(abs(xp - cx), _min_pw)
+        step_y = max(abs(yp - cy), _min_pw / 2.0)
+        xs = _expand(cx, step_x, fw)
+        ys = _expand(cy, step_y, fh)
+        # Force-insert exact placard position — a line must always pass through it.
+        xs = sorted(set(xs + [int(round(xp))]))
+        ys = sorted(set(ys + [int(round(yp))]))
     else:
         # Fallback: uniform 10 × 6 grid
         xs = [int(i * fw / 10) for i in range(11)]
@@ -260,30 +256,29 @@ def render_flat_annotated_image(
         cx = dst_w / 2.0
         cy = dst_h / 2.0
 
-        def _expand(origin: float, step: float, limit: int, max_hops=None) -> list[int]:
+        def _expand(origin: float, step: float, limit: int) -> list[int]:
             positions: list[int] = []
-            pos, hop = origin, 0
-            while pos <= limit and (max_hops is None or hop <= max_hops):
+            pos = origin
+            while pos <= limit:
                 positions.append(int(round(pos)))
-                pos += step; hop += 1
-            pos, hop = origin - step, 1
-            while pos >= 0 and (max_hops is None or hop <= max_hops):
+                pos += step
+            pos = origin - step
+            while pos >= 0:
                 positions.append(int(round(pos)))
-                pos -= step; hop += 1
+                pos -= step
             return sorted(set(positions))
 
-        # Step locked to placard-to-centre distance so the grid line always
-        # lands on the existing placard.  Minimum spacing rule caps extension.
-        step_x = max(abs(xp - cx), 1.0)
-        step_y = max(abs(yp - cy), 1.0)
         _min_pw = float(
             min((p["width"] for p in placard_predictions), default=0)
             or (grid_w if grid_w and grid_w > 0 else (placard_w or 1))
         )
-        max_hops_x = None if step_x >= _min_pw       else 1
-        max_hops_y = None if step_y >= _min_pw / 2.0 else 1
-        xs = _expand(cx, step_x, dst_w, max_hops=max_hops_x)
-        ys = _expand(cy, step_y, dst_h, max_hops=max_hops_y)
+        step_x = max(abs(xp - cx), _min_pw)
+        step_y = max(abs(yp - cy), _min_pw / 2.0)
+        xs = _expand(cx, step_x, dst_w)
+        ys = _expand(cy, step_y, dst_h)
+        # Force-insert exact placard position — a line must always pass through it.
+        xs = sorted(set(xs + [int(round(xp))]))
+        ys = sorted(set(ys + [int(round(yp))]))
     else:
         xs = [int(i * dst_w / 10) for i in range(11)]
         ys = [int(j * dst_h / 6)  for j in range(7)]
