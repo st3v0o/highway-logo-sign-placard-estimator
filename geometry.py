@@ -65,21 +65,53 @@ def prediction_to_mask(pred: dict, img_h: int, img_w: int) -> tuple[np.ndarray, 
     return bbox_to_mask(x1, y1, x2, y2, img_h, img_w), False
 
 
+def _remove_polygon_spikes(pts: np.ndarray, min_angle_deg: float = 50.0) -> np.ndarray:
+    """
+    Remove vertices that form sharp spikes.
+
+    For each vertex, compute the interior angle formed by its two neighbours.
+    If the angle is below min_angle_deg, the vertex is a spike and is dropped.
+    Iterates until no more spikes are found (handles consecutive spikes).
+    """
+    changed = True
+    while changed and len(pts) >= 4:
+        changed = False
+        n = len(pts)
+        keep: list[int] = []
+        for i in range(n):
+            prev_pt = pts[(i - 1) % n]
+            curr_pt = pts[i]
+            next_pt = pts[(i + 1) % n]
+            v1 = prev_pt - curr_pt
+            v2 = next_pt - curr_pt
+            norm = np.linalg.norm(v1) * np.linalg.norm(v2)
+            if norm < 1e-8:
+                keep.append(i)
+                continue
+            cos_a = np.dot(v1, v2) / norm
+            angle = float(np.degrees(np.arccos(np.clip(cos_a, -1.0, 1.0))))
+            if angle < min_angle_deg:
+                changed = True  # skip — this is a spike
+            else:
+                keep.append(i)
+        pts = pts[keep]
+    return pts
+
+
 def sign_polygon_from_pred(pred: dict) -> list[dict]:
     """
-    Return the Blue-Logo-Sign polygon with small spiky artifacts removed.
+    Return the Blue-Logo-Sign polygon with sharp spike vertices removed.
 
-    Applies Douglas-Peucker simplification (approxPolyDP) at ~1.5% of the
-    perimeter to trim noise points while preserving the true sign outline shape.
+    Uses angle-based spike detection: any vertex whose interior angle is below
+    50° is treated as a spike and dropped. Smooth curves and real corners (which
+    have wider angles) are left completely untouched.
     Falls back to bbox corners when no polygon is present.
     """
     points = pred.get("points")
     if points and len(points) >= 3:
         pts = np.array([[p["x"], p["y"]] for p in points], dtype=np.float32)
-        perimeter = cv2.arcLength(pts, closed=True)
-        epsilon = 0.03 * perimeter
-        simplified = cv2.approxPolyDP(pts, epsilon, closed=True).reshape(-1, 2)
-        return [{"x": float(p[0]), "y": float(p[1])} for p in simplified]
+        pts = _remove_polygon_spikes(pts, min_angle_deg=50.0)
+        return [{"x": float(p[0]), "y": float(p[1])} for p in pts]
     x1, y1, x2, y2 = bbox_to_xyxy(pred)
     return [
         {"x": float(x1), "y": float(y1)},
