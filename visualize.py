@@ -155,11 +155,13 @@ def draw_sign_corner_grid(
             [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
         ).reshape(-1, 1, 2)
         flat_centres = cv2.perspectiveTransform(centres, M).reshape(-1, 2)
-        x0 = float(np.median(flat_centres[:, 0]))
-        y0 = float(np.median(flat_centres[:, 1]))
+        xp = float(np.median(flat_centres[:, 0]))
+        yp = float(np.median(flat_centres[:, 1]))
+        cx = fw / 2.0
+        cy = fh / 2.0
 
         # Build lists of line positions by expanding outward from the anchor
-        def _expand(origin: float, step: int, limit: int) -> list[int]:
+        def _expand(origin: float, step: float, limit: int) -> list[int]:
             positions = []
             pos = origin
             while pos <= limit:
@@ -171,12 +173,14 @@ def draw_sign_corner_grid(
                 pos -= step
             return sorted(set(positions))
 
-        # Grid pitch based on DETECTED (unscaled) placard size — never changes with any slider.
+        # Step = distance from sign centre to existing placard centre.
+        # Anchor at sign centre → left and right grid lines are equidistant from edges,
+        # and one line lands exactly on the existing placard.
         _GRID_GAP = 8
         _pw = grid_w if grid_w and grid_w > 0 else (placard_w or 1)
         _ph = grid_h if grid_h and grid_h > 0 else (placard_h or 1)
-        xs = _expand(x0, max(1, _pw + _GRID_GAP), fw)
-        ys = _expand(y0, max(1, _ph + _GRID_GAP), fh)
+        xs = _expand(cx, max(abs(xp - cx), _pw + _GRID_GAP), fw)
+        ys = _expand(cy, max(abs(yp - cy), _ph + _GRID_GAP), fh)
     else:
         # Fallback: uniform 10 × 6 grid
         xs = [int(i * fw / 10) for i in range(11)]
@@ -244,10 +248,12 @@ def render_flat_annotated_image(
             [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
         ).reshape(-1, 1, 2)
         flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
-        x0 = float(np.median(flat_centres[:, 0]))
-        y0 = float(np.median(flat_centres[:, 1]))
+        xp = float(np.median(flat_centres[:, 0]))
+        yp = float(np.median(flat_centres[:, 1]))
+        cx = dst_w / 2.0
+        cy = dst_h / 2.0
 
-        def _expand(origin: float, step: int, limit: int) -> list[int]:
+        def _expand(origin: float, step: float, limit: int) -> list[int]:
             positions: list[int] = []
             pos = origin
             while pos <= limit:
@@ -259,12 +265,14 @@ def render_flat_annotated_image(
                 pos -= step
             return sorted(set(positions))
 
-        # Grid pitch based on DETECTED (unscaled) placard size — never changes with any slider.
+        # Step = distance from sign centre to existing placard centre.
+        # Anchor at sign centre → left and right grid lines are equidistant from edges,
+        # and one line lands exactly on the existing placard.
         _GRID_GAP = 8
         _pw = grid_w if grid_w and grid_w > 0 else (placard_w or 1)
         _ph = grid_h if grid_h and grid_h > 0 else (placard_h or 1)
-        xs = _expand(x0, max(1, _pw + _GRID_GAP), dst_w)
-        ys = _expand(y0, max(1, _ph + _GRID_GAP), dst_h)
+        xs = _expand(cx, max(abs(xp - cx), _pw + _GRID_GAP), dst_w)
+        ys = _expand(cy, max(abs(yp - cy), _ph + _GRID_GAP), dst_h)
     else:
         xs = [int(i * dst_w / 10) for i in range(11)]
         ys = [int(j * dst_h / 6)  for j in range(7)]

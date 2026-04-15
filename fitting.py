@@ -200,17 +200,21 @@ def place_rectangles_perspective_aware(
             [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
         ).reshape(-1, 1, 2)
         flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
-        x0 = float(np.median(flat_centres[:, 0]))
-        y0 = float(np.median(flat_centres[:, 1]))
-        # Grid pitch = DETECTED (unscaled) placard size + fixed 8 px gap.
-        # No slider (scale, spacing, margin) affects the grid line positions.
+        xp = float(np.median(flat_centres[:, 0]))
+        yp = float(np.median(flat_centres[:, 1]))
+        # Step = distance from sign centre to existing placard centre.
+        # Anchoring at sign centre (dst_w/2) with this step puts one line on
+        # the existing placard, one mirrored line the same distance from the
+        # opposite edge, and one line at the centre — perfectly symmetric.
+        cx = dst_w / 2.0
+        cy = dst_h / 2.0
         _GRID_GAP = 8
         base_x = grid_w if grid_w and grid_w > 0 else placard_w
         base_y = grid_h if grid_h and grid_h > 0 else placard_h
-        step_x = max(1, base_x + _GRID_GAP)
-        step_y = max(1, base_y + _GRID_GAP)
-        grid_xs = _grid_lines(x0, step_x, dst_w)
-        grid_ys = _grid_lines(y0, step_y, dst_h)
+        step_x = max(abs(xp - cx), base_x + _GRID_GAP)
+        step_y = max(abs(yp - cy), base_y + _GRID_GAP)
+        grid_xs = _grid_lines(cx, step_x, dst_w)
+        grid_ys = _grid_lines(cy, step_y, dst_h)
 
     quads: list[list[list[float]]] = []
 
