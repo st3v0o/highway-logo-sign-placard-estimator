@@ -210,9 +210,27 @@ def place_rectangles_perspective_aware(
     quads: list[list[list[float]]] = []
 
     if grid_xs is not None and grid_ys is not None:
-        # Grid-snapped placement: try every grid intersection (x_line, y_line)
-        # where the placard centre lands on both a vertical and horizontal grid line.
-        available = warped_mask.copy()
+        # Grid-snapped placement: try every grid intersection.
+        # The availability mask covers the FULL flat sign space (all 1s) with
+        # existing placards punched out.  We do NOT require the slot to sit inside
+        # the empty-space detection polygon — the grid anchor already guarantees
+        # alignment with real placard positions, so any in-bounds, unoccupied
+        # grid cell is a valid proposed slot.
+        available = np.ones((dst_h, dst_w), dtype=np.uint8)
+        if placard_predictions:
+            for pp in placard_predictions:
+                px, py = pp.get("x", 0), pp.get("y", 0)
+                pw2, ph2 = pp.get("width", 0) / 2, pp.get("height", 0) / 2
+                box = np.array([
+                    [px - pw2, py - ph2],
+                    [px + pw2, py - ph2],
+                    [px + pw2, py + ph2],
+                    [px - pw2, py + ph2],
+                ], dtype=np.float32).reshape(-1, 1, 2)
+                flat_box = cv2.perspectiveTransform(box, H).reshape(-1, 2).astype(np.int32)
+                # erode slightly so the border of the existing placard doesn't eat
+                # into adjacent grid cells
+                cv2.fillConvexPoly(available, flat_box, 0)
         for y_line in grid_ys:
             y1 = int(round(y_line - placard_h / 2))
             y2 = y1 + placard_h
