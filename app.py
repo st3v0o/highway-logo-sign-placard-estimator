@@ -219,6 +219,35 @@ def _to_jpeg_bytes(img, quality: int = 82) -> bytes:
     return buf.getvalue()
 
 
+def _warp_sign_flat(pil_image: Image.Image, sign_quad: list[dict]) -> bytes | None:
+    """
+    Warp the sign region to a flat rectangle using the 4-corner sign quad.
+    Returns JPEG bytes of the de-perspected sign, or None if the quad is invalid.
+    """
+    if not sign_quad or len(sign_quad) != 4:
+        return None
+    from geometry import order_points
+    img_rgb = np.array(pil_image.convert("RGB"))
+    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+
+    pts = np.array([[p["x"], p["y"]] for p in sign_quad], dtype=np.float32)
+    src = order_points(pts)
+
+    w_top  = float(np.linalg.norm(src[1] - src[0]))
+    w_bot  = float(np.linalg.norm(src[2] - src[3]))
+    h_left = float(np.linalg.norm(src[3] - src[0]))
+    h_right= float(np.linalg.norm(src[2] - src[1]))
+    dst_w  = min(int(max(w_top, w_bot)), 2000)
+    dst_h  = min(int(max(h_left, h_right)), 2000)
+    if dst_w < 10 or dst_h < 10:
+        return None
+
+    dst = np.array([[0, 0], [dst_w - 1, 0], [dst_w - 1, dst_h - 1], [0, dst_h - 1]], dtype=np.float32)
+    M   = cv2.getPerspectiveTransform(src, dst)
+    flat = cv2.warpPerspective(img_bgr, M, (dst_w, dst_h), flags=cv2.INTER_LANCZOS4)
+    return _to_jpeg_bytes(cv2.cvtColor(flat, cv2.COLOR_BGR2RGB))
+
+
 def _current_fitting_params() -> dict:
     return {
         "default_placard_w":        int(st.session_state.default_placard_w),
@@ -284,7 +313,8 @@ def _run_fitting(
         sign_polygon=results.get("sign_polygon"),
     )
     annotated_bytes = _to_jpeg_bytes(annotated_rgb)
-    return annotated_bytes, results
+    flat_bytes = _warp_sign_flat(pil_image, results.get("sign_quad"))
+    return annotated_bytes, flat_bytes, results
 
 
 def _placard_preds(placard_resp: dict, conf: float) -> list[dict]:
@@ -317,7 +347,7 @@ def _run_inference_on_image(pil_image: Image.Image, sign_id: str) -> dict:
     placard_pred_list = _placard_preds(placard_resp, conf)
     params           = _current_fitting_params()
 
-    annotated_bytes, results = _run_fitting(
+    annotated_bytes, flat_bytes, results = _run_fitting(
         pil_image, sign_pred, empty_pred_list, placard_pred_list, params
     )
 
@@ -329,6 +359,7 @@ def _run_inference_on_image(pil_image: Image.Image, sign_id: str) -> dict:
     return {
         "sign_id":              sign_id,
         "annotated_bytes":      annotated_bytes,
+        "flat_bytes":           flat_bytes,
         "total_fit":            results["total_fit"],
         "placard_w":            results["placard_w"],
         "placard_h":            results["placard_h"],
@@ -357,7 +388,7 @@ def _refit_result_item(item: dict, params: dict) -> dict:
     placard_pred_list = item.get("_placard_pred_list", [])
 
     pil_image = Image.open(BytesIO(item["_img_bytes"])).convert("RGB")
-    annotated_bytes, results = _run_fitting(
+    annotated_bytes, flat_bytes, results = _run_fitting(
         pil_image, sign_pred, empty_pred_list, placard_pred_list, params
     )
 
@@ -369,6 +400,7 @@ def _refit_result_item(item: dict, params: dict) -> dict:
     return {
         **item,
         "annotated_bytes":      annotated_bytes,
+        "flat_bytes":           flat_bytes,
         "total_fit":            results["total_fit"],
         "placard_w":            results["placard_w"],
         "placard_h":            results["placard_h"],
@@ -393,13 +425,21 @@ def _render_results(results_list: list) -> None:
 
         col_img, col_stats = st.columns([3, 1])
         with col_img:
-            st.caption(
-                "**Cyan** = proposed new placard slots  |  "
-                "**Orange** = detected empty regions  |  "
-                "**Green** = detected existing placards  |  "
-                "**Yellow** = sign boundary"
-            )
-            st.image(item["annotated_bytes"], use_container_width=True)
+            tab_annotated, tab_flat = st.tabs(["Annotated", "Perspective-Corrected Sign"])
+            with tab_annotated:
+                st.caption(
+                    "**Cyan** = proposed new placard slots  |  "
+                    "**Orange** = detected empty regions  |  "
+                    "**Green** = detected existing placards  |  "
+                    "**Yellow** = sign boundary"
+                )
+                st.image(item["annotated_bytes"], use_container_width=True)
+            with tab_flat:
+                if item.get("flat_bytes"):
+                    st.caption("Sign panel warped to a flat rectangle using the model-detected sign boundary.")
+                    st.image(item["flat_bytes"], use_container_width=True)
+                else:
+                    st.info("No sign boundary detected — perspective correction not available.")
 
         with col_stats:
             n = item["n_regions_fit"]
