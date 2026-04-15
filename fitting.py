@@ -126,6 +126,20 @@ def place_rectangles_in_region(
 # Perspective-aware placement
 # ---------------------------------------------------------------------------
 
+def _grid_lines(origin: float, step: float, limit: int) -> list[float]:
+    """Return all grid line positions within [0, limit] anchored at origin."""
+    lines: list[float] = []
+    pos = origin
+    while pos <= limit:
+        lines.append(pos)
+        pos += step
+    pos = origin - step
+    while pos >= 0:
+        lines.append(pos)
+        pos -= step
+    return sorted(lines)
+
+
 def place_rectangles_perspective_aware(
     region_pred: dict,
     placard_w: int,
@@ -175,60 +189,108 @@ def place_rectangles_perspective_aware(
         kernel = np.ones((2 * margin + 1, 2 * margin + 1), dtype=np.uint8)
         warped_mask = _safe_erode(warped_mask, kernel)
 
-    # Simple uniform grid across the full flat sign area.
-    # Step = placard size + spacing (the spacing slider controls the gap
-    # between adjacent proposed slots).
-    step_x = max(1, placard_w + spacing)
-    step_y = max(1, placard_h + spacing)
-
-    # Cell centres: first cell starts at margin + half-placard, then repeats.
-    xs: list[int] = []
-    xc = margin + placard_w // 2
-    while xc + (placard_w - placard_w // 2) <= dst_w - margin:
-        xs.append(xc)
-        xc += step_x
-
-    ys: list[int] = []
-    yc = margin + placard_h // 2
-    while yc + (placard_h - placard_h // 2) <= dst_h - margin:
-        ys.append(yc)
-        yc += step_y
-
-    # Available mask: full sign area (all 1s) with existing placard bounding
-    # boxes punched out.  No extra spacing buffer around existing placards —
-    # the only rule is "don't intersect an existing placard".
-    available = np.ones((dst_h, dst_w), dtype=np.uint8)
-    if placard_predictions:
-        for pp in placard_predictions:
-            px, py = pp.get("x", 0), pp.get("y", 0)
-            pw2, ph2 = pp.get("width", 0) / 2, pp.get("height", 0) / 2
-            box = np.array([
-                [px - pw2, py - ph2],
-                [px + pw2, py - ph2],
-                [px + pw2, py + ph2],
-                [px - pw2, py + ph2],
-            ], dtype=np.float32).reshape(-1, 1, 2)
-            flat_box = cv2.perspectiveTransform(box, H).reshape(-1, 2).astype(np.int32)
-            cv2.fillConvexPoly(available, flat_box, 0)
+    # Build grid anchor from detected placard centres (warped to flat space)
+    grid_xs: list[float] | None = None
+    grid_ys: list[float] | None = None
+    if placard_predictions and placard_w > 0 and placard_h > 0:
+        # Anchor the grid at the median centre of existing placard detections
+        # (warped to flat space) so a grid line always passes through each
+        # existing placard.
+        centres = np.array(
+            [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
+        ).reshape(-1, 1, 2)
+        flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
+        xp = float(np.median(flat_centres[:, 0]))
+        yp = float(np.median(flat_centres[:, 1]))
+        # Step = distance from sign centre to existing placard centre.
+        # Anchoring at sign centre (dst_w/2) with this step puts one line on
+        # the existing placard, one mirrored line the same distance from the
+        # opposite edge, and one line at the centre — perfectly symmetric.
+        cx = dst_w / 2.0
+        cy = dst_h / 2.0
+        # Minimum spacing rules for the regular grid.
+        _min_pw = float(
+            min((p["width"] for p in placard_predictions), default=0)
+            or (grid_w if grid_w and grid_w > 0 else placard_w)
+            or 1
+        )
+        # Regular grid anchored at sign centre with minimum-spacing step.
+        step_x = max(abs(xp - cx), _min_pw)
+        step_y = max(abs(yp - cy), _min_pw / 2.0)
+        raw_xs = _grid_lines(cx, step_x, dst_w)
+        raw_ys = _grid_lines(cy, step_y, dst_h)
+        # Snap the nearest regular line to the exact placard centre so exactly
+        # one line passes through it (no extras added, no duplicate).
+        def _snap(lines, target):
+            if not lines:
+                return lines
+            nearest = min(lines, key=lambda v: abs(v - target))
+            return sorted(set([target if v == nearest else v for v in lines]))
+        grid_xs = _snap(raw_xs, xp)
+        grid_ys = _snap(raw_ys, yp)
 
     quads: list[list[list[float]]] = []
 
-    for yc in ys:
-        y1 = yc - placard_h // 2
-        y2 = y1 + placard_h
-        for xc in xs:
-            x1 = xc - placard_w // 2
-            x2 = x1 + placard_w
-            if not can_place_rectangle(available, x1, y1, placard_w, placard_h):
+    if grid_xs is not None and grid_ys is not None:
+        # Grid-snapped placement: try every grid intersection.
+        # available = full sign flat space (all 1s) with existing placards and
+        # their spacing buffers punched out.  Outer margin is enforced via
+        # per-slot boundary checks.
+        available = np.ones((dst_h, dst_w), dtype=np.uint8)
+        if placard_predictions:
+            for pp in placard_predictions:
+                px, py = pp.get("x", 0), pp.get("y", 0)
+                pw2, ph2 = pp.get("width", 0) / 2, pp.get("height", 0) / 2
+                # Expand each existing placard by the spacing buffer so proposed
+                # slots cannot land within `spacing` px of an occupied slot.
+                pw2s = pw2 + spacing
+                ph2s = ph2 + spacing
+                box = np.array([
+                    [px - pw2s, py - ph2s],
+                    [px + pw2s, py - ph2s],
+                    [px + pw2s, py + ph2s],
+                    [px - pw2s, py + ph2s],
+                ], dtype=np.float32).reshape(-1, 1, 2)
+                flat_box = cv2.perspectiveTransform(box, H).reshape(-1, 2).astype(np.int32)
+                cv2.fillConvexPoly(available, flat_box, 0)
+        for y_line in grid_ys:
+            y1 = int(round(y_line - placard_h / 2))
+            y2 = y1 + placard_h
+            # Outer margin: keep proposed slots away from the sign boundary
+            if y1 < margin or y2 > dst_h - margin:
                 continue
+            for x_line in grid_xs:
+                x1 = int(round(x_line - placard_w / 2))
+                x2 = x1 + placard_w
+                if x1 < margin or x2 > dst_w - margin:
+                    continue
+                if not can_place_rectangle(available, x1, y1, placard_w, placard_h):
+                    continue
+                corners = np.array(
+                    [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32
+                ).reshape(-1, 1, 2)
+                warped_corners = cv2.perspectiveTransform(corners, H_inv).reshape(-1, 2)
+                quads.append(warped_corners.tolist())
+                # Reserve the footprint PLUS the spacing buffer so no other
+                # proposed slot can land within `spacing` px of this one.
+                sy1 = max(0, y1 - spacing)
+                sx1 = max(0, x1 - spacing)
+                sy2 = min(dst_h, y2 + spacing)
+                sx2 = min(dst_w, x2 + spacing)
+                available[sy1:sy2, sx1:sx2] = 0
+                if global_reserved is not None:
+                    cv2.fillConvexPoly(global_reserved, warped_corners.astype(np.int32), 1)
+    else:
+        # Fallback: greedy dense scan
+        flat_placements = place_rectangles_in_region(
+            warped_mask, placard_w, placard_h, spacing=spacing
+        )
+        for (x1, y1, x2, y2) in flat_placements:
             corners = np.array(
                 [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32
             ).reshape(-1, 1, 2)
             warped_corners = cv2.perspectiveTransform(corners, H_inv).reshape(-1, 2)
             quads.append(warped_corners.tolist())
-            # Mark the placed slot as occupied so adjacent proposals can't
-            # overlap it (relevant when spacing = 0).
-            available[max(0, y1):min(dst_h, y2), max(0, x1):min(dst_w, x2)] = 0
             if global_reserved is not None:
                 cv2.fillConvexPoly(global_reserved, warped_corners.astype(np.int32), 1)
 
