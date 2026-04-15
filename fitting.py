@@ -438,4 +438,5 @@ def estimate_total_capacity(
         "sign_quad":             sign_quad,
         "sign_polygon":          sign_polygon,
         "size_from_detections":  size_from_detections,
+        "sign_homography":       sign_homography,
     }

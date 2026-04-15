@@ -194,6 +194,113 @@ def draw_sign_corner_grid(
     return out
 
 
+def render_flat_annotated_image(
+    pil_image: Image.Image,
+    sign_homography: tuple,
+    per_region: list[dict],
+    placard_predictions: list[dict],
+    empty_space_predictions: list[dict],
+    placard_w: int | None = None,
+    placard_h: int | None = None,
+    min_confidence: float = 0.0,
+) -> Image.Image:
+    """
+    Render the perspective-corrected (flat) sign view with overlays drawn
+    directly in flat space:
+      - Grid lines anchored to detected placard centres
+      - Orange polygons for detected empty regions
+      - Green boxes for detected existing placards
+      - Cyan rectangles for proposed new placard slots
+
+    sign_homography: (H, H_inv, dst_w, dst_h) from compute_region_homography.
+    quad_placements in per_region are in image space; they are warped back to
+    flat space via H before drawing.
+    """
+    H, H_inv, dst_w, dst_h = sign_homography
+
+    img_rgb = np.array(pil_image.convert("RGB"))
+    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+
+    flat = cv2.warpPerspective(img_bgr, H, (dst_w, dst_h), flags=cv2.INTER_LANCZOS4)
+
+    # --- Grid lines ---
+    use_anchored = (
+        placard_predictions
+        and placard_w and placard_w > 0
+        and placard_h and placard_h > 0
+    )
+    if use_anchored:
+        centres = np.array(
+            [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
+        ).reshape(-1, 1, 2)
+        flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
+        x0 = float(np.median(flat_centres[:, 0]))
+        y0 = float(np.median(flat_centres[:, 1]))
+
+        def _expand(origin: float, step: int, limit: int) -> list[int]:
+            positions: list[int] = []
+            pos = origin
+            while pos <= limit:
+                positions.append(int(round(pos)))
+                pos += step
+            pos = origin - step
+            while pos >= 0:
+                positions.append(int(round(pos)))
+                pos -= step
+            return sorted(set(positions))
+
+        xs = _expand(x0, placard_w, dst_w)
+        ys = _expand(y0, placard_h, dst_h)
+    else:
+        xs = [int(i * dst_w / 10) for i in range(11)]
+        ys = [int(j * dst_h / 6)  for j in range(7)]
+
+    overlay = flat.copy()
+    for x in xs:
+        cv2.line(overlay, (x, 0), (x, dst_h), COLOR_GRID, 2, cv2.LINE_AA)
+    for y in ys:
+        cv2.line(overlay, (0, y), (dst_w, y), COLOR_GRID, 2, cv2.LINE_AA)
+    flat = cv2.addWeighted(overlay, 0.45, flat, 0.55, 0)
+
+    # --- Empty regions (warp polygon to flat space) ---
+    for pred in empty_space_predictions:
+        if pred.get("confidence", 0) < min_confidence:
+            continue
+        pts = pred.get("points", [])
+        if not pts:
+            continue
+        pts_arr = np.array([[p["x"], p["y"]] for p in pts], dtype=np.float32).reshape(-1, 1, 2)
+        flat_pts = cv2.perspectiveTransform(pts_arr, H).reshape(-1, 2).astype(np.int32)
+        cv2.polylines(flat, [flat_pts], isClosed=True, color=COLOR_EMPTY_REGION, thickness=2, lineType=cv2.LINE_AA)
+
+    # --- Existing placards (warp bbox corners to flat space) ---
+    for pred in placard_predictions:
+        if pred.get("confidence", 0) < min_confidence:
+            continue
+        x_c, y_c = pred.get("x", 0), pred.get("y", 0)
+        pw, ph   = pred.get("width", 0), pred.get("height", 0)
+        corners  = np.array([
+            [x_c - pw / 2, y_c - ph / 2],
+            [x_c + pw / 2, y_c - ph / 2],
+            [x_c + pw / 2, y_c + ph / 2],
+            [x_c - pw / 2, y_c + ph / 2],
+        ], dtype=np.float32).reshape(-1, 1, 2)
+        flat_corners = cv2.perspectiveTransform(corners, H).reshape(-1, 2).astype(np.int32)
+        cv2.polylines(flat, [flat_corners], isClosed=True, color=COLOR_PLACARD, thickness=2, lineType=cv2.LINE_AA)
+
+    # --- Proposed placard slots (warp quad corners to flat space) ---
+    for region in per_region:
+        if not region.get("used_perspective"):
+            continue
+        for quad in region.get("quad_placements", []):
+            pts_arr = np.array(quad, dtype=np.float32).reshape(-1, 1, 2)
+            flat_pts = cv2.perspectiveTransform(pts_arr, H).reshape(-1, 2).astype(np.int32)
+            cv2.polylines(flat, [flat_pts], isClosed=True, color=COLOR_PROPOSED, thickness=2, lineType=cv2.LINE_AA)
+
+    flat_rgb = cv2.cvtColor(flat, cv2.COLOR_BGR2RGB)
+    return Image.fromarray(flat_rgb)
+
+
 def render_annotated_image(
     pil_image: Image.Image,
     placard_predictions: list[dict],

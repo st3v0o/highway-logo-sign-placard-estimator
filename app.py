@@ -33,7 +33,7 @@ from roboflow_client import (
     EMPTY_CLASS,
 )
 from fitting import estimate_total_capacity
-from visualize import render_annotated_image
+from visualize import render_annotated_image, render_flat_annotated_image
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +315,23 @@ def _run_fitting(
         placard_h=results.get("placard_h"),
     )
     annotated_bytes = _to_jpeg_bytes(annotated_rgb)
-    flat_bytes = _warp_sign_flat(pil_image, results.get("sign_quad"))
+
+    sign_homography = results.get("sign_homography")
+    if sign_homography is not None:
+        flat_pil = render_flat_annotated_image(
+            pil_image=pil_image,
+            sign_homography=sign_homography,
+            per_region=results["per_region"],
+            placard_predictions=placard_pred_list,
+            empty_space_predictions=empty_predictions,
+            placard_w=results.get("placard_w"),
+            placard_h=results.get("placard_h"),
+            min_confidence=0.0,
+        )
+        flat_bytes = _to_jpeg_bytes(flat_pil)
+    else:
+        flat_bytes = _warp_sign_flat(pil_image, results.get("sign_quad"))
+
     return annotated_bytes, flat_bytes, results
 
 
@@ -438,7 +454,12 @@ def _render_results(results_list: list) -> None:
                 st.image(item["annotated_bytes"], use_container_width=True)
             with tab_flat:
                 if item.get("flat_bytes"):
-                    st.caption("Sign panel warped to a flat rectangle using the model-detected sign boundary.")
+                    st.caption(
+                        "**Cyan** = proposed new placard slots  |  "
+                        "**Orange** = detected empty regions  |  "
+                        "**Green** = detected existing placards  |  "
+                        "**Grid** = placard-anchored slot grid"
+                    )
                     st.image(item["flat_bytes"], use_container_width=True)
                 else:
                     st.info("No sign boundary detected — perspective correction not available.")
