@@ -199,15 +199,14 @@ def place_rectangles_perspective_aware(
         flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
         x0 = float(np.median(flat_centres[:, 0]))
         y0 = float(np.median(flat_centres[:, 1]))
-        # Grid pitch: detected placard size + a small fixed gap (8 px).
-        # We intentionally do NOT add the user's `spacing` here — spacing is a
-        # reservation buffer used after placement, not a grid-density control.
-        # Using detected size (not scaled size) keeps the visual grid stable.
+        # Grid pitch = scaled slot size + a small fixed gap (8 px).
+        # Using the SCALED size means reducing placard_scale tightens the grid,
+        # allowing more columns/rows to fit within the same sign area.
+        # We intentionally do NOT add the user's `spacing` here — spacing is only
+        # a reservation buffer, not a grid-density control.
         _GRID_GAP = 8
-        base_x = grid_w if grid_w and grid_w > 0 else placard_w
-        base_y = grid_h if grid_h and grid_h > 0 else placard_h
-        step_x = base_x + _GRID_GAP
-        step_y = base_y + _GRID_GAP
+        step_x = placard_w + _GRID_GAP
+        step_y = placard_h + _GRID_GAP
         grid_xs = _grid_lines(x0, step_x, dst_w)
         grid_ys = _grid_lines(y0, step_y, dst_h)
 
