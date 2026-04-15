@@ -193,15 +193,14 @@ def place_rectangles_perspective_aware(
     grid_xs: list[float] | None = None
     grid_ys: list[float] | None = None
     if placard_predictions and placard_w > 0 and placard_h > 0:
-        centres = np.array(
-            [[p["x"], p["y"]] for p in placard_predictions], dtype=np.float32
-        ).reshape(-1, 1, 2)
-        flat_centres = cv2.perspectiveTransform(centres, H).reshape(-1, 2)
-        x0 = float(np.median(flat_centres[:, 0]))
-        y0 = float(np.median(flat_centres[:, 1]))
+        # Anchor the grid at the SIGN CENTRE so lines are equidistant from
+        # both the left and right edges (and top/bottom edges).
+        # The existing placard position is NOT used as the anchor — that would
+        # make the grid asymmetric whenever the placard is off-centre.
+        x0 = dst_w / 2.0
+        y0 = dst_h / 2.0
         # Grid pitch = DETECTED (unscaled) placard size + fixed 8 px gap.
-        # This is computed once from the model detection and never changes —
-        # no slider (scale, spacing, margin) affects the grid line positions.
+        # No slider (scale, spacing, margin) affects the grid line positions.
         _GRID_GAP = 8
         base_x = grid_w if grid_w and grid_w > 0 else placard_w
         base_y = grid_h if grid_h and grid_h > 0 else placard_h
